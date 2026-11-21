@@ -20,7 +20,7 @@ The manager lists it in the Installed column. Update it from the manager too.
 
 | Message you see in the mod that needs it | Meaning | Fix |
 |---|---|---|
-| `error: ShipControl not installed or too old (needs API 4); update MSCore Manager` | ShipControl is missing, or its API level or capability bits are too low | Install or update ShipControl in MSCore Manager, restart |
+| `error: ShipControl not installed or too old (needs API 4); update MSCore Manager` (printed by the mining mod; API 4 is mining's minimum) | ShipControl is missing, or its API level or capability bits are too low | Install or update ShipControl in MSCore Manager, restart |
 | `owned by <name>` | another mod already controls that ship (one owner per ship; the host mod may show it with its own prefix) | Stop the other mod's job on that ship, or use another ship |
 | `error: ShipControl killed` / `ShipControl killed` | the kill switch is on; every control call is refused | A mod or tool called `SC_kill(1)`. Restart the game, or the mod that set it must call `SC_kill(0)` |
 | `error: MSCore flight unavailable` | MSCore is missing or older than 0.8.13 | Update MSCore in MSCore Manager |
@@ -82,7 +82,7 @@ Rules:
 | Owner name | wide string in `SC_claim`, `SC_release`, `SC_release_all`; narrow string in every other export (`SC_move_start`, `SC_set_host_for`, `SC_*_for`, `SC_watch`, `SC_zero`) |
 | Claim first | `SC_move_start`, `SC_watch`, `SC_zero` and the bubble ladder act only on a ship you own |
 | Sizes | `ScHost` 24, 80 or 112; `ScMoveReq` 128; `ScMoveStatus` 64; `ScTune` `sizeof(ScTune)`; `ScSpeed` `sizeof(ScSpeed)`; `ScBubbleStatus` 56. Set `size` first; a wrong size is refused |
-| Callbacks | run on the game thread, may call `SC_*`, must never throw |
+| Callbacks | run on the game thread, may call `SC_*`, must never throw. `on_move_done` and `on_speed_abort` run after the registry lock is released, the others inside it (see ScHost layout) |
 | Legacy exports | `SC_set_host`, `SC_set_tune`, `SC_tick_*` without `_for` act for owner `mining` only. Use the `_for` exports with your own owner name |
 | Poll | `SC_move_active(sid)`, `SC_move_status(sid, &st)` (set `st.size = sizeof(ScMoveStatus)`), `SC_move_cancel(owner, sid)` |
 
@@ -114,7 +114,7 @@ Every export returns `int`, takes `wchar_t* err, int errlen` where it can refuse
 | 2 | 4 | move jobs (API 3) |
 | 3 | 8 | bubble ladder (API 4) |
 
-Callers check the bit they need. A caller that sees a bit clear must not use that feature.
+Bits 1, 2 and 3 are set together: all three need MSCore flight to load (`SC_caps` in `dllmain.cpp`); if it fails only bit 0 is set. Callers check the bit they need. A caller that sees a bit clear must not use that feature.
 
 ## ScHost layout (`SC_set_host`)
 
@@ -124,7 +124,7 @@ The host is the mod's table of callbacks, filled by the caller. Offsets on x64:
 - 8 `log`, 16 `on_speed_abort`, 24 `tlog`, 32 `on_move_done`, 40 `warp_begin`, 48 `remain_m`, 56 `target_ok`, 64 `ore_loc`, 72 `braking` (level 3 ends at 80)
 - 80 `first_blocker`, 88 `bubble_profile`, 96 `on_bubble`, 104 `near_rock` (level 4, size 112)
 
-`SC_set_host` accepts size 24, 80 or `sizeof(ScHost)` (112) and refuses others. It zeroes its copy and copies `min(size, sizeof)`, so a level 2 or 3 caller gets the older set. Callbacks run on the game thread inside the registry lock; they may call `SC_*`, never throw. `ScTune` has an exact size check (`size == sizeof(ScTune)`).
+`SC_set_host` accepts size 24, 80 or `sizeof(ScHost)` (112) and refuses others. It zeroes its copy and copies `min(size, sizeof)`, so a level 2 or 3 caller gets the older set. Callbacks run on the game thread, may call `SC_*`, never throw. Lock state differs: `on_move_done` (`SC_tick_frame*`) and `on_speed_abort` (`SC_tick_speed*`) run after the registry lock is released. All other callbacks run inside the (recursive) registry lock: the bubble callbacks (`first_blocker`, `bubble_profile`, `on_bubble`, `near_rock`) during `SC_tick_bubble*`, the move helpers (`tlog`, `log`, `target_ok`, `ore_loc`, `braking`, `remain_m`) during `SC_tick_frame*`, and `warp_begin` inside `SC_move_start`. `ScTune` has an exact size check (`size == sizeof(ScTune)`).
 
 Structs of level 4: `ScBlockHit` (56), `ScBubbleProfile` (72), `ScBubbleEvent` (88), `ScBubbleStatus` (56). Their offsets are checked by `static_assert` in `sc_api.h`.
 
@@ -137,9 +137,9 @@ Structs of level 4: `ScBlockHit` (56), `ScBubbleProfile` (72), `ScBubbleEvent` (
 
 ## How mining uses it
 
-MiningBenchMod 0.3.0 (requires ShipControl 0.3.0, MSCore 0.8.13):
+MiningBenchMod 0.3.0 (requires ShipControl 0.3.0, MSCore 0.8.13). Its minimum is API 4 and the 112-byte ScHost; ShipControl 0.4.0 reports API 5, which satisfies it:
 
-- Start and Collect (sweep) claim the ship for owner `mining` (`mb_shipctl.hpp`, `sc_claim_ship`). No claim, no loop: refused with `error: ShipControl not installed or too old (needs API 4); update MSCore Manager` when ShipControl or the caps bits are missing, or `error: ship <err>` when another owner holds the ship.
+- Start and Collect (sweep) claim the ship for owner `mining` (`mb_shipctl.hpp`, `sc_claim_ship`). No claim, no loop: refused with `error: ShipControl not installed or too old (needs API 4); update MSCore Manager` (printed by the mining mod, not by ShipControl) when ShipControl or the caps bits are missing, or `error: ship <err>` when another owner holds the ship.
 - Every move job (approach a rock, a point, floating ore) is started with `SC_move_start`. ShipControl builds the job, steps the throttle and aim, and calls back `on_move_done`.
 - The speed guard runs in `SC_tick_speed`; `SC_zero` stops a ship for mining.
 - The bubble ladder (a rock on the nose: brake, replan, waypoint, nudge, resume) runs in `SC_tick_bubble`. Mining answers the ladder through `first_blocker` (registry query, ship spheres), `bubble_profile` (job state), `on_bubble` (replan, skip, fly) and `near_rock`.
