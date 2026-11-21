@@ -6,6 +6,88 @@ Version **0.4.0** (`sc_version.hpp`), API level **5** (`sc_api.h`, `SC_API_LEVEL
 
 The header `sc_api.h` is the contract. Append only: an export or a field is never changed or reordered.
 
+## How to use
+
+### For players
+
+ShipControl is a dependency, not a feature. It has no window, no hotkey and no settings. Install it because another mod (MiningBenchMod, Fleet) needs it.
+
+1. Open MSCore Manager.
+2. Install **ShipControl** (and **MSCore** 0.8.13 or newer, which it needs).
+3. Restart the game.
+
+The manager lists it in the Installed column. Update it from the manager too.
+
+| Message you see in the mod that needs it | Meaning | Fix |
+|---|---|---|
+| `error: ShipControl not installed or too old (needs API 4); update MSCore Manager` | ShipControl is missing, or its API level or capability bits are too low | Install or update ShipControl in MSCore Manager, restart |
+| `owned by <name>` | another mod already controls that ship (one owner per ship; the host mod may show it with its own prefix) | Stop the other mod's job on that ship, or use another ship |
+| `error: ShipControl killed` / `ShipControl killed` | the kill switch is on; every control call is refused | A mod or tool called `SC_kill(1)`. Restart the game, or the mod that set it must call `SC_kill(0)` |
+| `error: MSCore flight unavailable` | MSCore is missing or older than 0.8.13 | Update MSCore in MSCore Manager |
+| `error: move job already running` | that ship already has a move job | Wait for it or cancel it |
+
+### For mod authors
+
+Plain C ABI, header `sc_api.h` (copy it into your mod). The DLL is `Mods/ShipControl/dlls/main.dll`. Flow: load, check level and caps, install your host, claim, start a job, tick every frame, handle the callback, release.
+
+```cpp
+#include "sc_api.h"
+#include <windows.h>
+
+// 1. load the DLL and resolve exports (every UE4SS mod DLL is called main.dll: use the full path)
+//    <game>\Binaries\Win64\ue4ss\Mods\ShipControl\dlls\main.dll
+HMODULE h = LoadLibraryW(shipControlDllPath.c_str());   // already loaded by UE4SS: returns the same module
+auto SC_api_f   = (int(*)())                                  GetProcAddress(h, "SC_api");
+auto SC_caps_f  = (int(*)())                                  GetProcAddress(h, "SC_caps");
+auto SC_set_host_for_f = (int(*)(const char*, const ScHost*)) GetProcAddress(h, "SC_set_host_for");
+auto SC_claim_f = (int(*)(const wchar_t*, int, wchar_t*, int)) GetProcAddress(h, "SC_claim");
+auto SC_move_start_f = (int(*)(const char*, int, ScMoveReq*, wchar_t*, int)) GetProcAddress(h, "SC_move_start");
+auto SC_tick_frame_for_f = (int(*)(const char*, double))      GetProcAddress(h, "SC_tick_frame_for");
+auto SC_release_f = (int(*)(const wchar_t*, int, wchar_t*, int)) GetProcAddress(h, "SC_release");
+
+// 2. check level and capability bits; never use a feature whose bit is clear
+if (!SC_api_f || SC_api_f() < 5) return;                 // owner-scoped exports need API 5
+if (!(SC_caps_f() & 4)) return;                          // bit 2 (value 4) = move jobs
+
+// 3. install your callbacks (size = sizeof(ScHost) = 112)
+static void on_done(int sid, int seq, const wchar_t* result) { /* result "ok ..." or "error: ..." */ }
+ScHost host{};
+host.size = sizeof(ScHost);
+host.on_move_done = on_done;      // null move callbacks fail closed
+SC_set_host_for_f("mymod", &host);
+
+// 4. claim, move, tick, release
+wchar_t err[256] = {};
+if (!SC_claim_f(L"mymod", shipId, err, 256)) { /* err = "owned by <name>" */ return; }
+
+ScMoveReq req{};
+req.size = sizeof(ScMoveReq);     // 128
+req.kind = 0;                     // 0 face, 1 approach
+req.seq  = 1;                     // returned in on_move_done
+req.mode = 0;                     // fixed world point pt_uu (uu)
+req.pt_uu[0] = x; req.pt_uu[1] = y; req.pt_uu[2] = z;
+if (!SC_move_start_f("mymod", shipId, &req, err, 256)) { /* err = "error: ..." */ }
+
+// every game tick: step your own jobs; -1 = killed or MSCore unusable (jobs already ended, on_move_done called)
+SC_tick_frame_for_f("mymod", dt);
+
+// when finished, or on your unload (SC_release_all(owner) frees all of them)
+SC_release_f(L"mymod", shipId, err, 256);
+```
+
+Rules:
+
+| Rule | Detail |
+|---|---|
+| Owner name | wide string in `SC_claim`, `SC_release`, `SC_release_all`; narrow string in every other export (`SC_move_start`, `SC_set_host_for`, `SC_*_for`, `SC_watch`, `SC_zero`) |
+| Claim first | `SC_move_start`, `SC_watch`, `SC_zero` and the bubble ladder act only on a ship you own |
+| Sizes | `ScHost` 24, 80 or 112; `ScMoveReq` 128; `ScMoveStatus` 64; `ScTune` `sizeof(ScTune)`; `ScSpeed` `sizeof(ScSpeed)`; `ScBubbleStatus` 56. Set `size` first; a wrong size is refused |
+| Callbacks | run on the game thread, may call `SC_*`, must never throw |
+| Legacy exports | `SC_set_host`, `SC_set_tune`, `SC_tick_*` without `_for` act for owner `mining` only. Use the `_for` exports with your own owner name |
+| Poll | `SC_move_active(sid)`, `SC_move_status(sid, &st)` (set `st.size = sizeof(ScMoveStatus)`), `SC_move_cancel(owner, sid)` |
+
+Kill switch: `SC_kill(1, err, n)` refuses every control export and ticks return -1 until `SC_kill(0, err, n)`. Check the return of every tick and stop your own loop on -1.
+
 ## Changes
 
 - 0.4.0: API 5, owner-scoped host/tune/ticks (two mods can use ShipControl together). API 4 exports unchanged (they act for owner `mining` ONLY: a legacy client that uses another owner name must move to the `_for` exports; Fleet 0.5.0+ requires API 5).
