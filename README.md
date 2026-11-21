@@ -21,7 +21,7 @@ The manager lists it in the Installed column. Update it from the manager too.
 | Message you see in the mod that needs it | Meaning | Fix |
 |---|---|---|
 | `error: ShipControl not installed or too old (needs API 4); update MSCore Manager` | ShipControl is missing, or its API level or capability bits are too low | Install or update ShipControl in MSCore Manager, restart |
-| `error: ship owned by <name>` | another mod already controls that ship (one owner per ship) | Stop the other mod's job on that ship, or use another ship |
+| `owned by <name>` | another mod already controls that ship (one owner per ship; the host mod may show it with its own prefix) | Stop the other mod's job on that ship, or use another ship |
 | `error: ShipControl killed` / `ShipControl killed` | the kill switch is on; every control call is refused | A mod or tool called `SC_kill(1)`. Restart the game, or the mod that set it must call `SC_kill(0)` |
 | `error: MSCore flight unavailable` | MSCore is missing or older than 0.8.13 | Update MSCore in MSCore Manager |
 | `error: move job already running` | that ship already has a move job | Wait for it or cancel it |
