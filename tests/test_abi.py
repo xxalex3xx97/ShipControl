@@ -30,7 +30,17 @@ for name in ("SC_set_host_for", "SC_set_tune_for", "SC_tick_speed_for", "SC_tick
 with open(os.path.join(root, "sc_api.h"), encoding="utf-8") as f:
     lvl = re.search(r"#define SC_API_LEVEL\s+(\d+)", f.read())
 with open(os.path.join(root, "dllmain.cpp"), encoding="utf-8") as f:
-    ret = re.search(r"SC_api\(\)\s*\{\s*try\s*\{\s*return\s+(\d+);", f.read())
+    dll = f.read()
+ret = re.search(r"SC_api\(\)[^}]*?return\s+(\d+)\s*;", dll)
+# legacy exports must be one-line wrappers of the _for export with owner "mining" (kLegacyOwner)
+if 'kLegacyOwner = "mining"' not in dll:
+    print("FAIL kLegacyOwner is not mining")
+    fails += 1
+for legacy, new in (("SC_set_host", "SC_set_host_for"), ("SC_set_tune", "SC_set_tune_for"), ("SC_tick_speed", "SC_tick_speed_for"),
+                    ("SC_tick_frame", "SC_tick_frame_for"), ("SC_tick_bubble", "SC_tick_bubble_for")):
+    if not re.search(r"SHIP_CONTROL_API int " + legacy + r"\([^)]*\)\s*\{\s*return " + new + r"\(kLegacyOwner,", dll):
+        print(f"FAIL {legacy} is not a wrapper of {new}(kLegacyOwner, ...)")
+        fails += 1
 if not lvl or lvl.group(1) != "5" or not ret or ret.group(1) != "5":
     print("FAIL SC_api() / SC_API_LEVEL is not 5")
     fails += 1

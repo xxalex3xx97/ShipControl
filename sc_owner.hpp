@@ -1,15 +1,13 @@
 // FILE: mods/ShipControl/sc_owner.hpp
 // WHAT: ship owner registry: one controller per ship. claim, release, release_all, owner_of. Pure std, no game types.
 // WHY: a ship is driven by one behaviour at a time (mining, attack, follow, defend). Refusing a second owner keeps two controllers from fighting over the same ship.
-// DEPENDS ON (exact): <map>, <string>, sc_api.h (ScHost, for ScHosts)
+// DEPENDS ON (exact): <map>, <string>
 // USED BY: dllmain.cpp (exports), tests/test_shipcontrol.cpp
 // GAME FACTS: none. Ship ids are plain ints chosen by the caller.
 #pragma once
 
 #include <map>
 #include <string>
-
-#include "sc_api.h"
 
 class ScOwners
 {
@@ -68,31 +66,4 @@ public:
 
 private:
     std::map<int, std::string> m_own;   // ship id -> owner name; absent = free
-};
-
-// WHAT: true when a job / watch entry of entry_owner belongs to the owner `only` that is being ticked.
-// WHY: API 5 ticks are per owner; one mod's tick never steps another mod's jobs.
-inline bool sc_owner_match(const std::string& entry_owner, const std::string& only) { return entry_owner == only; }
-
-// WHAT: per-owner host callbacks and speed_k (API 5). of() = zero ScHost when the owner set none.
-class ScHosts
-{
-public:
-    const ScHost& of(const std::string& owner) const
-    {
-        static const ScHost none{};
-        auto it = m_host.find(owner);
-        return it == m_host.end() ? none : it->second;
-    }
-    void set(const std::string& owner, const ScHost& host) { m_host[owner] = host; }
-    double speed_k(const std::string& owner, double def) const
-    {
-        auto it = m_k.find(owner);
-        return it == m_k.end() ? def : it->second;
-    }
-    void set_speed_k(const std::string& owner, double k) { m_k[owner] = k; }
-
-private:
-    std::map<std::string, ScHost> m_host;
-    std::map<std::string, double> m_k;
 };

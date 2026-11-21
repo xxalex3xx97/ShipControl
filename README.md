@@ -8,7 +8,7 @@ The header `sc_api.h` is the contract. Append only: an export or a field is neve
 
 ## Changes
 
-- 0.4.0: API 5, owner-scoped host/tune/ticks (two mods can use ShipControl together). API 4 exports unchanged (they act for owner `mining`).
+- 0.4.0: API 5, owner-scoped host/tune/ticks (two mods can use ShipControl together). API 4 exports unchanged (they act for owner `mining` ONLY: a legacy client that uses another owner name must move to the `_for` exports; Fleet 0.5.0+ requires API 5).
 - 0.3.1: no code or API change. The version is bumped because the ShipControl source moves to its own repository (history kept). The header comments in `sc_logic_path.hpp` no longer name a single mod, since MiningBenchMod and Fleet both include it. A mod that requires ShipControl@0.3.0 is still satisfied.
 
 ## API levels

@@ -16,6 +16,7 @@
 #include "sc_version.hpp"
 #include "sc_common.hpp"
 #include "sc_owner.hpp"
+#include "sc_hosts.hpp"
 #include "sc_speed.hpp"
 #include "sc_move.hpp"
 #include "sc_bubble_run.hpp"
@@ -151,6 +152,19 @@ extern "C"
         return 0;
     }
 
+    // WHAT: narrow owner name (char*) to the same normalised key owner_arg gives: ASCII, non-empty. false = invalid.
+    bool owner_key(const char* owner, std::string& out)
+    {
+        if (!owner) return false;
+        out.clear();
+        for (const char* p = owner; *p; ++p)
+        {
+            if (static_cast<unsigned char>(*p) < 1 || static_cast<unsigned char>(*p) > 127) return false;
+            out.push_back(*p);
+        }
+        return !out.empty();
+    }
+
     // WHAT: owner claims ship. 1 = ok, 0 = refused (err says who owns it).
     SHIP_CONTROL_API int SC_claim(const wchar_t* owner, int ship, wchar_t* err, int errlen)
     {
@@ -220,13 +234,14 @@ extern "C"
     {
         try
         {
-            if (!owner || !*owner) return 0;
+            std::string who;
+            if (!owner_key(owner, who)) return 0;
             if (!host || (host->size != SC_HOST_SIZE_L2 && host->size != SC_HOST_SIZE_L3 && host->size != static_cast<int32_t>(sizeof(ScHost)))) return 0;
             std::lock_guard<std::recursive_mutex> lk(g_mx);
             if (g_killed.load()) return 0;
             ScHost nh{};
             std::memcpy(&nh, host, (std::min)(static_cast<size_t>(host->size), sizeof(ScHost)));
-            g_hosts.set(owner, nh);
+            g_hosts.set(who, nh);
             return 1;
         }
         catch (...) { return 0; }
@@ -240,11 +255,13 @@ extern "C"
     {
         try
         {
-            if (!owner || !*owner) return 0;
+            std::string who;
+            if (!owner_key(owner, who)) return 0;
             if (!tune || tune->size != static_cast<int32_t>(sizeof(ScTune))) return 0;
+            if (!(tune->speed_k > 0.0) || !std::isfinite(tune->speed_k)) return 0;   // NaN, <= 0, inf: keep the previous value
             std::lock_guard<std::recursive_mutex> lk(g_mx);
             if (g_killed.load()) return 0;
-            g_hosts.set_speed_k(owner, tune->speed_k);
+            g_hosts.set_speed_k(who, tune->speed_k);
             return 1;
         }
         catch (...) { return 0; }
@@ -278,13 +295,13 @@ extern "C"
     //       >= 0 = fresh aborts this step, -1 = MSCore not usable or killed (nothing zeroed).
     SHIP_CONTROL_API int SC_tick_speed_for(const char* owner, double dt)
     {
-        if (!owner || !*owner) return -1;
-        const std::string only = owner;
         std::vector<SpeedAbort> fresh;
         int n = -1;
         ScHost h{};
+        std::string only;
         try
         {
+            if (!owner_key(owner, only)) return -1;
             std::lock_guard<std::recursive_mutex> lk(g_mx);
             if (g_killed.load()) return -1;
             n = speed_tick(dt, fresh, only, g_hosts.speed_k(only, SC_SPEED_K_DEFAULT));
@@ -389,13 +406,13 @@ extern "C"
     //       writes when killed, 'error: MSCore flight unavailable' when MSCore is unusable). on_move_done runs per ended job after the lock is released.
     SHIP_CONTROL_API int SC_tick_frame_for(const char* owner, double dt)
     {
-        if (!owner || !*owner) return -1;
-        const std::string only = owner;
         std::vector<Done> done;
         ScHost h{};
         int n = -1;
+        std::string only;
         try
         {
+            if (!owner_key(owner, only)) return -1;
             std::lock_guard<std::recursive_mutex> lk(g_mx);
             h = g_hosts.of(only);
             if (g_killed.load()) finish_all(L"error: ShipControl killed", h, done, false, only);
@@ -423,10 +440,10 @@ extern "C"
     //       not usable (nothing written). Callbacks run under the registry lock (host may call SC_*; recursive mutex).
     SHIP_CONTROL_API int SC_tick_bubble_for(const char* owner, double dt)
     {
-        if (!owner || !*owner) return -1;
-        const std::string only = owner;
         try
         {
+            std::string only;
+            if (!owner_key(owner, only)) return -1;
             std::lock_guard<std::recursive_mutex> lk(g_mx);
             if (g_killed.load()) return -1;
             std::wstring why;

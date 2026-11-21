@@ -11,7 +11,6 @@
 #pragma once
 
 #include "sc_mscore.hpp"
-#include "sc_owner.hpp"   // API 5: sc_owner_match
 #include "sc_math.hpp"
 #include "sc_frame.hpp"   // SC2b A1: sc_calib_learn (object-to-actor axis map)
 #include <cstring>
@@ -111,20 +110,27 @@ namespace
     // WHAT: one poll step for every watched ship. Over-limit ships are zeroed on every step; the first step over is added to fresh.
     //       Returns the number of fresh aborts, or -1 when MSCore is not usable (nothing sampled, nothing zeroed).
     // WHY: fail closed: no MSCore means no speed guard, so the caller is told (the mining side then keeps its own monitor).
+    // WHAT: ids of the ships watched by owner `only` (API 5: a tick steps only its owner's watches).
+    std::vector<int> speed_ids(const std::string& only)
+    {
+        std::vector<int> ids;
+        for (const auto& w : g_spd.watch) if (w.second == only) ids.push_back(w.first);
+        return ids;
+    }
+
     int speed_tick(double dt, std::vector<SpeedAbort>& fresh, const std::string& only, double speed_k)
     {
         if (g_spd.watch.empty()) return 0;
         std::wstring why;
         if (!ms_load(why)) return -1;
-        for (const auto& w : g_spd.watch)
+        for (int sid : speed_ids(only))
         {
-            if (!sc_owner_match(w.second, only)) continue;   // API 5: only this owner's ships
-            SpeedMon& sp = g_spd.mon[w.first];
-            if (!speed_sample(w.first, dt, speed_k, sp)) continue;
+            SpeedMon& sp = g_spd.mon[sid];
+            if (!speed_sample(sid, dt, speed_k, sp)) continue;
             double ratio = 0.0;
             const int j = speed_judge(sp, ratio);
-            if (j == SJ_OVER || j == SJ_OVER_NEW) ms_zero(w.first, why);
-            if (j == SJ_OVER_NEW) fresh.push_back({w.first, ratio});
+            if (j == SJ_OVER || j == SJ_OVER_NEW) ms_zero(sid, why);
+            if (j == SJ_OVER_NEW) fresh.push_back({sid, ratio});
         }
         return static_cast<int>(fresh.size());
     }

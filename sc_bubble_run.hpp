@@ -265,12 +265,19 @@ namespace
 
     // WHAT: one bubble tick over every watched ship and every ship with a ladder state. One SEH guard per ship: a fault logs
     //       'BUBBLE fault' and erases that ship's state. Returns the passes run (dt unused: the ladder is per pass, not per second).
+    // WHAT: ship ids of one bubble tick for owner `only`: ships it WATCHES (watch owner, claimed or not) + ladder-state ships nobody watches whose claim owner is `only`.
+    std::vector<int> bub_ids(const ScOwners& own, const std::string& only)
+    {
+        std::vector<int> ids;
+        for (const auto& w : g_spd.watch) if (w.second == only) ids.push_back(w.first);
+        for (const auto& b : g_bub) if (!g_spd.watch.count(b.first) && own.owner_of(b.first) == only) ids.push_back(b.first);
+        return ids;
+    }
+
     int sc_bubble_tick(double dt, const ScHost& h, const ScOwners& own, const std::string& only)
     {
         (void)dt;
-        std::vector<int> ids;
-        for (const auto& w : g_spd.watch) if (sc_owner_match(own.owner_of(w.first), only)) ids.push_back(w.first);
-        for (const auto& b : g_bub) if (!g_spd.watch.count(b.first) && sc_owner_match(own.owner_of(b.first), only)) ids.push_back(b.first);
+        std::vector<int> ids = bub_ids(own, only);
         int ran = 0;
         for (int sid : ids)
         {
