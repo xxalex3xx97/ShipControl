@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1
+
+- Same behaviour as 0.3.0. No code or API change.
+- Source now lives in this repository, with its history (imported from MSMiningUnit `mods/ShipControl`).
+- Version bump. Header comments in `sc_logic_path.hpp` are neutral: MiningBenchMod and Fleet both include it.
+- Tests moved here (`tests/`).
+
 ## 0.3.0
 
 - First release.
