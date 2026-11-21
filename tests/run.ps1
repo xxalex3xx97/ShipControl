@@ -14,11 +14,16 @@ function Add-Row($name, $status, $detail) {
 
 # ---- 1. test_shipcontrol (ShipControl owner registry, sc_owner.hpp) ----
 Write-Host "== test_shipcontrol" -ForegroundColor Cyan
-cmd /c "`"$bt\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>nul && set" | ForEach-Object {
-    if ($_ -match '^([^=]+)=(.*)$') { Set-Item "env:$($Matches[1])" $Matches[2] }
+if (-not (Get-Command cl -ErrorAction SilentlyContinue)) {   # CI already put cl on PATH (vswhere); locally load the BuildTools env
+    cmd /c "`"$bt\VC\Auxiliary\Build\vcvars64.bat`" >nul 2>nul && set" | ForEach-Object {
+        if ($_ -match '^([^=]+)=(.*)$') { Set-Item "env:$($Matches[1])" $Matches[2] }
+    }
 }
-cl /nologo /EHsc /std:c++17 /W3 /I . tests\test_shipcontrol.cpp /Fe:tests\out\test_shipcontrol.exe /Fo:tests\out\
-if ($LASTEXITCODE -ne 0) {
+Remove-Item tests\out\test_shipcontrol.exe -ErrorAction SilentlyContinue
+if (Get-Command cl -ErrorAction SilentlyContinue) {
+    cl /nologo /EHsc /std:c++17 /W3 /I . tests\test_shipcontrol.cpp /Fe:tests\out\test_shipcontrol.exe /Fo:tests\out\
+}
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path tests\out\test_shipcontrol.exe)) {   # a missing compiler or exe is a FAIL, never a stale exit code
     Add-Row 'test_shipcontrol' 'FAIL' 'compile failed'
 } else {
     $out = & .\tests\out\test_shipcontrol.exe 2>&1
