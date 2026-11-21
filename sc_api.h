@@ -4,6 +4,7 @@
  * SC0 exports: api, caps, kill, claim, owner, release, release_all. Every export returns int; err/errlen = wide text reason (errlen wide chars, may be 0).
  * SC2b (API level 3) appends: move jobs (SC_move_start, SC_move_cancel, SC_move_active, SC_move_status, SC_tick_frame) and ScHost 80 bytes.
  * SC3 (API level 4) appends: bubble ladder (SC_tick_bubble, SC_bubble_status), ScHost 112 bytes (4 callbacks), structs ScBlockHit, ScBubbleProfile, ScBubbleEvent, ScBubbleStatus.
+ * SC4 (API level 5) appends: owner-scoped SC_set_host_for, SC_set_tune_for, SC_tick_speed_for, SC_tick_frame_for, SC_tick_bubble_for. The legacy exports act for owner "mining".
  * GAME FACTS: none. */
 #ifndef SC_API_H
 #define SC_API_H
@@ -18,7 +19,7 @@
 extern "C" {
 #endif
 
-#define SC_API_LEVEL 4
+#define SC_API_LEVEL 5
 
 /* wchar_t must be 16-bit (Windows) to match the DLL */
 #ifdef __cplusplus
@@ -27,7 +28,7 @@ static_assert(sizeof(wchar_t) == 2, "ShipControl ABI expects 16-bit wchar_t");
 
 #ifndef SC_API_NO_PROTOTYPES   /* SC_API_NO_PROTOTYPES: the DLL defines it before including this header (it needs the types only). MSVC rejects dllexport definitions that also have these prototypes (C2375). */
 
-/* API level: 1 = owner registry (SC0). 2 = speed monitor (SC2a): needs MSCore API >= 10 (0.8.13) at runtime. 3 = move jobs (SC2b). 4 = bubble ladder (SC3). */
+/* API level: 1 = owner registry (SC0). 2 = speed monitor (SC2a): needs MSCore API >= 10 (0.8.13) at runtime. 3 = move jobs (SC2b). 4 = bubble ladder (SC3). 5 = owner-scoped host/tune/ticks. */
 int SC_api(void);
 /* capability bits: bit 0 = owner registry, bit 1 = speed monitor (MSCore usable), bit 2 (value 4) = move jobs (API 3), bit 3 (value 8) = bubble ladder (API 4). */
 int SC_caps(void);
@@ -281,6 +282,17 @@ int SC_tick_frame(double dt);
 int SC_tick_bubble(double dt);
 /* ladder state of ship sid into out (size must be sizeof(ScBubbleStatus)). 1 = ok (have 0 when no state), 0 = refused (killed or bad size). */
 int SC_bubble_status(int sid, ScBubbleStatus* out);
+#endif /* SC_API_NO_PROTOTYPES */
+
+/* ---- level 5 exports (owner-scoped, append-only): two mods use ShipControl together ---- */
+#ifndef SC_API_NO_PROTOTYPES
+/* as SC_set_host / SC_set_tune but for one owner. The legacy SC_set_host / SC_set_tune act for owner "mining". null/empty owner = 0 (refused). */
+int SC_set_host_for(const char* owner, const ScHost* host);
+int SC_set_tune_for(const char* owner, const ScTune* tune);
+/* as SC_tick_speed / SC_tick_frame / SC_tick_bubble but only the jobs and ships of owner (its host and speed_k). Legacy ticks act for owner "mining". null/empty owner = -1. */
+int SC_tick_speed_for(const char* owner, double dt);
+int SC_tick_frame_for(const char* owner, double dt);
+int SC_tick_bubble_for(const char* owner, double dt);
 #endif /* SC_API_NO_PROTOTYPES */
 
 #ifdef __cplusplus
