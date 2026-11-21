@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0
+
+- API 5: owner-scoped host/tune/ticks (two mods can use ShipControl together); API 4 exports unchanged (owner mining).
+- New exports: `SC_set_host_for`, `SC_set_tune_for`, `SC_tick_speed_for`, `SC_tick_frame_for`, `SC_tick_bubble_for`. `SC_api()` returns 5.
+- Each owner has its own host and speed_k; a `_for` tick only steps that owner's jobs and ships.
+
 ## 0.3.1
 
 - Same behaviour as 0.3.0. No code or API change.

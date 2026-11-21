@@ -154,10 +154,10 @@ namespace
     }
 
     // WHAT: ends every job (killed / MSCore unusable) with res. writes as in finish_job.
-    void finish_all(const std::wstring& res, const ScHost& h, std::vector<Done>& done, bool writes)
+    void finish_all(const std::wstring& res, const ScHost& h, std::vector<Done>& done, bool writes, const std::string& only)
     {
         std::vector<int> ids;
-        for (const auto& kv : g_jobs_mv) ids.push_back(kv.first);
+        for (const auto& kv : g_jobs_mv) if (sc_owner_match(kv.second.owner, only)) ids.push_back(kv.first);
         for (int sid : ids) finish_job(sid, res, h, done, writes);
     }
 
@@ -396,10 +396,10 @@ namespace
 
     // WHAT: move job tick over every live job. Copies the id list first (a finish erases its entry).
     //       A fault inside a job ends that job only ("error: target lost", logged once). Returns the number of jobs stepped.
-    int sc_move_tick(double dt, const ScHost& h, std::vector<Done>& done)
+    int sc_move_tick(double dt, const ScHost& h, std::vector<Done>& done, const std::string& only)
     {
         std::vector<int> ids;
-        for (const auto& kv : g_jobs_mv) ids.push_back(kv.first);
+        for (const auto& kv : g_jobs_mv) if (sc_owner_match(kv.second.owner, only)) ids.push_back(kv.first);
         int n = 0;
         for (int sid : ids)
         {

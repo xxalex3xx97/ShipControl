@@ -327,7 +327,7 @@ static void t_qcal_and_frame()
 // SC2b A2: move-job ABI sizes (also checked by static_asserts in sc_api.h) and the pure view raw conversion of sc_move.hpp.
 static void t_move_abi()
 {
-    CHECK(SC_API_LEVEL == 4);
+    CHECK(SC_API_LEVEL == 5);
     CHECK(sizeof(ScHost) == 112 && SC_HOST_SIZE_L2 == 24 && SC_HOST_SIZE_L3 == 80);
     CHECK(sizeof(ScMoveReq) == 128 && sizeof(ScMoveStatus) == 64);
     CHECK(sc_view_raw(1.0) == 65536 && sc_view_raw(-0.5) == -32768 && sc_view_raw(0.0) == 0);   // llround of deg * 65536
@@ -614,6 +614,28 @@ int main()
         why.clear();
         CHECK(!o.may_act(5, "mining", why) && why == "owned by attack");
         CHECK(o.may_act(5, "attack", why));            // holder may act
+    }
+
+    {   // API 5: per-owner hosts, tune and tick filter
+        ScHosts hs;
+        ScHost a{}, b{};
+        a.size = 111; b.size = 222;
+        hs.set("mining", a);
+        hs.set("fleet", b);
+        CHECK(hs.of("mining").size == 111 && hs.of("fleet").size == 222);   // kept separate
+        CHECK(hs.of("none").size == 0 && hs.of("none").log == nullptr);     // absent = zero host
+        hs.set_speed_k("fleet", 7.0);
+        CHECK(hs.speed_k("fleet", 60.0) == 7.0 && hs.speed_k("mining", 60.0) == 60.0);
+        CHECK(sc_owner_match("mining", "mining") && !sc_owner_match("mining", "fleet"));   // ticking fleet never selects a mining job
+        CHECK(sc_owner_match("fleet", "fleet") && !sc_owner_match("fleet", "mining"));     // and vice versa
+        g_jobs_mv.clear();
+        ScJob jm, jf;
+        jm.owner = "mining"; jf.owner = "fleet";
+        g_jobs_mv[1] = jm; g_jobs_mv[2] = jf;
+        std::vector<Done> dn;
+        finish_all(L"x", ScHost{}, dn, false, "fleet");   // finishes only fleet jobs
+        CHECK(g_jobs_mv.count(1) == 1 && g_jobs_mv.count(2) == 0 && dn.size() == 1 && dn[0].sid == 2);
+        g_jobs_mv.clear();
     }
 
     t_moved_steer();

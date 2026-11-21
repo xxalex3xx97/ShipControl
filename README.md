@@ -2,12 +2,13 @@
 
 Releases (zip + manifest.txt) are published on this repo's Releases page.
 
-Version **0.3.1** (`sc_version.hpp`), API level **4** (`sc_api.h`, `SC_API_LEVEL`). A UE4SS mod that owns ship control for other mods (MiningBenchMod is the first user). It exports a plain C ABI; other mods load `main.dll` and resolve the names with `GetProcAddress`. Needs MSCore 0.8.13 at runtime (flight reads and writes go through MSCore).
+Version **0.4.0** (`sc_version.hpp`), API level **5** (`sc_api.h`, `SC_API_LEVEL`). A UE4SS mod that owns ship control for other mods (MiningBenchMod is the first user). It exports a plain C ABI; other mods load `main.dll` and resolve the names with `GetProcAddress`. Needs MSCore 0.8.13 at runtime (flight reads and writes go through MSCore).
 
 The header `sc_api.h` is the contract. Append only: an export or a field is never changed or reordered.
 
 ## Changes
 
+- 0.4.0: API 5, owner-scoped host/tune/ticks (two mods can use ShipControl together). API 4 exports unchanged (they act for owner `mining`).
 - 0.3.1: no code or API change. The version is bumped because the ShipControl source moves to its own repository (history kept). The header comments in `sc_logic_path.hpp` no longer name a single mod, since MiningBenchMod and Fleet both include it. A mod that requires ShipControl@0.3.0 is still satisfied.
 
 ## API levels
@@ -18,6 +19,7 @@ The header `sc_api.h` is the contract. Append only: an export or a field is neve
 | 2 | speed monitor: `SC_set_host`, `SC_set_tune`, `SC_watch`, `SC_tick_speed`, `SC_speed`, `SC_zero`. ScHost 24 bytes | MSCore API >= 10 (0.8.13) |
 | 3 | move jobs: `SC_move_start`, `SC_move_cancel`, `SC_move_active`, `SC_move_status`, `SC_tick_frame`. ScHost 80 bytes | MSCore flight |
 | 4 | bubble ladder: `SC_tick_bubble`, `SC_bubble_status`. ScHost 112 bytes (4 callbacks: `first_blocker`, `bubble_profile`, `on_bubble`, `near_rock`) | MSCore flight |
+| 5 | owner-scoped: `SC_set_host_for`, `SC_set_tune_for`, `SC_tick_speed_for`, `SC_tick_frame_for`, `SC_tick_bubble_for` (owner = `mining`, `fleet`, ...). Legacy `SC_set_host`, `SC_set_tune`, `SC_tick_*` = the `_for` call with owner `mining`. A `_for` tick steps only that owner's jobs and ships and uses that owner's host and speed_k | same as 4 |
 
 Every export returns `int`, takes `wchar_t* err, int errlen` where it can refuse, and catches its own exceptions (a failure is a return code, never a throw).
 

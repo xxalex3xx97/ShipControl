@@ -265,12 +265,12 @@ namespace
 
     // WHAT: one bubble tick over every watched ship and every ship with a ladder state. One SEH guard per ship: a fault logs
     //       'BUBBLE fault' and erases that ship's state. Returns the passes run (dt unused: the ladder is per pass, not per second).
-    int sc_bubble_tick(double dt, const ScHost& h)
+    int sc_bubble_tick(double dt, const ScHost& h, const ScOwners& own, const std::string& only)
     {
         (void)dt;
         std::vector<int> ids;
-        for (const auto& w : g_spd.watch) ids.push_back(w.first);
-        for (const auto& b : g_bub) if (!g_spd.watch.count(b.first)) ids.push_back(b.first);
+        for (const auto& w : g_spd.watch) if (sc_owner_match(own.owner_of(w.first), only)) ids.push_back(w.first);
+        for (const auto& b : g_bub) if (!g_spd.watch.count(b.first) && sc_owner_match(own.owner_of(b.first), only)) ids.push_back(b.first);
         int ran = 0;
         for (int sid : ids)
         {

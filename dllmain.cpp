@@ -25,7 +25,8 @@ namespace
     std::recursive_mutex g_mx;       // guards g_owners, g_spd, g_jobs_mv (exports may run on any thread; recursive so host callbacks may call SC_*)
     ScOwners g_owners;
     std::atomic<bool> g_killed{false};   // kill switch: refuses claim/release while true
-    ScHost g_host{};                 // host callbacks (SC_set_host); guarded by g_mx
+    ScHosts g_hosts;                 // API 5: host callbacks + speed_k per owner; guarded by g_mx
+    const char* const kLegacyOwner = "mining";   // legacy SC_set_host / SC_set_tune / SC_tick_* act for this owner
 
     // WHAT: writes one line to the host log (mining's tlog), or to the UE4SS log when no host is set.
     // WHY: speed and watch messages reach the mod that owns the ship.
@@ -118,7 +119,7 @@ extern "C"
     // WHAT: API level (sc_api.h SC_API_LEVEL). Callers refuse to run below the level they need.
     SHIP_CONTROL_API int SC_api()
     {
-        try { return 4; }
+        try { return 5; }
         catch (...) { return 0; }
     }
 
@@ -184,7 +185,7 @@ extern "C"
             std::string who;
             if (!owner_arg(owner, who, why)) return false;
             if (!g_owners.release(ship, who, why)) return false;
-            drop_job(ship, who, g_host);   // SC2b: the owner's move job on this ship ends (no callback)
+            drop_job(ship, who, g_hosts.of(who));   // SC2b: the owner's move job on this ship ends (no callback)
             bub_drop(ship);                // SC3: the ladder state of this ship ends
             return true;
         }, err, errlen);
@@ -200,7 +201,7 @@ extern "C"
             std::lock_guard<std::recursive_mutex> lk(g_mx);
             if (g_killed.load()) { put_err("ShipControl killed", err, errlen); return -1; }
             const int n = g_owners.release_all(who);
-            drop_jobs_owned(who, g_host);   // SC2b: the owner's move jobs end (no callback)
+            drop_jobs_owned(who, g_hosts.of(who));   // SC2b: the owner's move jobs end (no callback)
             for (auto it = g_bub.begin(); it != g_bub.end();)   // SC3: ladder states of ships with no owner now end
             {
                 if (g_owners.owner_of(it->first).empty()) it = g_bub.erase(it);
@@ -215,33 +216,42 @@ extern "C"
 
     // WHAT: installs the host callbacks. size = SC_HOST_SIZE_L2 (24, API 2 layout), SC_HOST_SIZE_L3 (80, API 3) or sizeof(ScHost) (112, API 4). 1 = ok, 0 = refused.
     // WHY: mining gets its log, its abort callback, the move callbacks (API 3) and the bubble callbacks (API 4) here; the rest of the struct stays zero (null callbacks).
-    SHIP_CONTROL_API int SC_set_host(const ScHost* host)
+    SHIP_CONTROL_API int SC_set_host_for(const char* owner, const ScHost* host)
     {
         try
         {
+            if (!owner || !*owner) return 0;
             if (!host || (host->size != SC_HOST_SIZE_L2 && host->size != SC_HOST_SIZE_L3 && host->size != static_cast<int32_t>(sizeof(ScHost)))) return 0;
             std::lock_guard<std::recursive_mutex> lk(g_mx);
             if (g_killed.load()) return 0;
-            g_host = ScHost{};
-            std::memcpy(&g_host, host, (std::min)(static_cast<size_t>(host->size), sizeof(ScHost)));
+            ScHost nh{};
+            std::memcpy(&nh, host, (std::min)(static_cast<size_t>(host->size), sizeof(ScHost)));
+            g_hosts.set(owner, nh);
             return 1;
         }
         catch (...) { return 0; }
     }
 
+    // WHAT: legacy: installs the host for owner "mining" (API 4 behaviour).
+    SHIP_CONTROL_API int SC_set_host(const ScHost* host) { return SC_set_host_for(kLegacyOwner, host); }
+
     // WHAT: installs the tuning (speed_k). size must equal sizeof(ScTune). 1 = ok, 0 = refused.
-    SHIP_CONTROL_API int SC_set_tune(const ScTune* tune)
+    SHIP_CONTROL_API int SC_set_tune_for(const char* owner, const ScTune* tune)
     {
         try
         {
+            if (!owner || !*owner) return 0;
             if (!tune || tune->size != static_cast<int32_t>(sizeof(ScTune))) return 0;
             std::lock_guard<std::recursive_mutex> lk(g_mx);
             if (g_killed.load()) return 0;
-            g_spd.speed_k = tune->speed_k;
+            g_hosts.set_speed_k(owner, tune->speed_k);
             return 1;
         }
         catch (...) { return 0; }
     }
+
+    // WHAT: legacy: installs the tuning for owner "mining" (API 4 behaviour).
+    SHIP_CONTROL_API int SC_set_tune(const ScTune* tune) { return SC_set_tune_for(kLegacyOwner, tune); }
 
     // WHAT: owner watches (on=1) or stops watching (on=0) the speed of ship. Refused when another owner holds the ship,
     //       or (on=1) when MSCore is too old. 1 = ok, 0 = refused.
@@ -254,10 +264,10 @@ extern "C"
             std::lock_guard<std::recursive_mutex> lk(g_mx);
             if (g_killed.load()) return 0;
             std::string why;
-            if (!g_owners.may_act(sid, who, why)) { host_say(g_host, L"SC_watch refused ship=" + std::to_wstring(sid) + L": " + widen(why)); return 0; }
+            if (!g_owners.may_act(sid, who, why)) { host_say(g_hosts.of(who), L"SC_watch refused ship=" + std::to_wstring(sid) + L": " + widen(why)); return 0; }
             if (!on) { g_spd.watch.erase(sid); g_spd.mon.erase(sid); return 1; }
             std::wstring e;
-            if (!ms_load(e)) { host_say(g_host, L"SC_watch refused ship=" + std::to_wstring(sid) + L": " + e); return 0; }
+            if (!ms_load(e)) { host_say(g_hosts.of(who), L"SC_watch refused ship=" + std::to_wstring(sid) + L": " + e); return 0; }
             g_spd.watch[sid] = who;
             return 1;
         }
@@ -266,8 +276,10 @@ extern "C"
 
     // WHAT: one speed poll step for every watched ship (dt in s). Over-limit ships are zeroed; each first abort calls on_speed_abort once.
     //       >= 0 = fresh aborts this step, -1 = MSCore not usable or killed (nothing zeroed).
-    SHIP_CONTROL_API int SC_tick_speed(double dt)
+    SHIP_CONTROL_API int SC_tick_speed_for(const char* owner, double dt)
     {
+        if (!owner || !*owner) return -1;
+        const std::string only = owner;
         std::vector<SpeedAbort> fresh;
         int n = -1;
         ScHost h{};
@@ -275,8 +287,8 @@ extern "C"
         {
             std::lock_guard<std::recursive_mutex> lk(g_mx);
             if (g_killed.load()) return -1;
-            n = speed_tick(dt, fresh);
-            h = g_host;
+            n = speed_tick(dt, fresh, only, g_hosts.speed_k(only, SC_SPEED_K_DEFAULT));
+            h = g_hosts.of(only);
         }
         catch (...) { return -1; }
         // callbacks run without the registry lock: the host may call back into SC_zero / SC_release.
@@ -287,6 +299,9 @@ extern "C"
         }
         return n;
     }
+
+    // WHAT: legacy: speed tick for owner "mining".
+    SHIP_CONTROL_API int SC_tick_speed(double dt) { return SC_tick_speed_for(kLegacyOwner, dt); }
 
     // WHAT: speed reading of a watched ship into out (size must equal sizeof(ScSpeed)). 1 = ok, 0 = not watched or refused.
     SHIP_CONTROL_API int SC_speed(int sid, ScSpeed* out)
@@ -321,7 +336,7 @@ extern "C"
             std::string why;
             if (!g_owners.may_act(sid, who, why)) { put_err("error: ship " + why, err, errlen); return 0; }
             std::wstring w;
-            if (!move_start_job(who, sid, *req, g_host, w)) { if (err && errlen > 0) { std::wstring c = w.substr(0, static_cast<size_t>(errlen - 1)); std::memcpy(err, c.c_str(), (c.size() + 1) * sizeof(wchar_t)); } return 0; }
+            if (!move_start_job(who, sid, *req, g_hosts.of(who), w)) { if (err && errlen > 0) { std::wstring c = w.substr(0, static_cast<size_t>(errlen - 1)); std::memcpy(err, c.c_str(), (c.size() + 1) * sizeof(wchar_t)); } return 0; }
             return 1;
         }
         catch (const std::exception& e) { put_err(std::string("exception: ") + e.what(), err, errlen); }
@@ -339,7 +354,7 @@ extern "C"
             const std::string who = owner;
             std::lock_guard<std::recursive_mutex> lk(g_mx);
             if (g_killed.load()) return 0;
-            return move_cancel_job(who, sid, g_host);
+            return move_cancel_job(who, sid, g_hosts.of(who));
         }
         catch (...) { return 0; }
     }
@@ -372,21 +387,23 @@ extern "C"
 
     // WHAT: one tick of every move job (dt in s). >= 0 = jobs stepped, -1 = killed or MSCore unusable (every job is ended first: no game
     //       writes when killed, 'error: MSCore flight unavailable' when MSCore is unusable). on_move_done runs per ended job after the lock is released.
-    SHIP_CONTROL_API int SC_tick_frame(double dt)
+    SHIP_CONTROL_API int SC_tick_frame_for(const char* owner, double dt)
     {
+        if (!owner || !*owner) return -1;
+        const std::string only = owner;
         std::vector<Done> done;
         ScHost h{};
         int n = -1;
         try
         {
             std::lock_guard<std::recursive_mutex> lk(g_mx);
-            h = g_host;
-            if (g_killed.load()) finish_all(L"error: ShipControl killed", h, done, false);
+            h = g_hosts.of(only);
+            if (g_killed.load()) finish_all(L"error: ShipControl killed", h, done, false, only);
             else
             {
                 std::wstring why;
-                if (!ms_load(why)) finish_all(L"error: MSCore flight unavailable", h, done, false);
-                else n = sc_move_tick(dt, h, done);
+                if (!ms_load(why)) finish_all(L"error: MSCore flight unavailable", h, done, false, only);
+                else n = sc_move_tick(dt, h, done, only);
             }
         }
         catch (...) { n = -1; }
@@ -399,21 +416,29 @@ extern "C"
         return n;
     }
 
+    // WHAT: legacy: move tick for owner "mining".
+    SHIP_CONTROL_API int SC_tick_frame(double dt) { return SC_tick_frame_for(kLegacyOwner, dt); }
+
     // WHAT: one bubble pass over every watched ship and every ship with a ladder state (dt in s). >= 0 = ships passed, -1 = killed or MSCore
     //       not usable (nothing written). Callbacks run under the registry lock (host may call SC_*; recursive mutex).
-    SHIP_CONTROL_API int SC_tick_bubble(double dt)
+    SHIP_CONTROL_API int SC_tick_bubble_for(const char* owner, double dt)
     {
+        if (!owner || !*owner) return -1;
+        const std::string only = owner;
         try
         {
             std::lock_guard<std::recursive_mutex> lk(g_mx);
             if (g_killed.load()) return -1;
             std::wstring why;
             if (!ms_load(why)) return -1;
-            const ScHost h = g_host;
-            return sc_bubble_tick(dt, h);
+            const ScHost h = g_hosts.of(only);
+            return sc_bubble_tick(dt, h, g_owners, only);
         }
         catch (...) { return -1; }
     }
+
+    // WHAT: legacy: bubble tick for owner "mining".
+    SHIP_CONTROL_API int SC_tick_bubble(double dt) { return SC_tick_bubble_for(kLegacyOwner, dt); }
 
     // WHAT: ladder state of ship sid into out (size must be sizeof(ScBubbleStatus)). 1 = ok (have 0 when no state), 0 = refused (killed or bad size).
     SHIP_CONTROL_API int SC_bubble_status(int sid, ScBubbleStatus* out)
@@ -440,9 +465,9 @@ extern "C"
             std::lock_guard<std::recursive_mutex> lk(g_mx);
             if (g_killed.load()) return 0;
             std::string why;
-            if (!g_owners.may_act(sid, who, why)) { host_say(g_host, L"SC_zero refused ship=" + std::to_wstring(sid) + L": " + widen(why)); return 0; }
+            if (!g_owners.may_act(sid, who, why)) { host_say(g_hosts.of(who), L"SC_zero refused ship=" + std::to_wstring(sid) + L": " + widen(why)); return 0; }
             std::wstring e;
-            if (!ms_load(e) || !ms_zero(sid, e)) { host_say(g_host, L"SC_zero failed ship=" + std::to_wstring(sid) + L": " + e); return 0; }
+            if (!ms_load(e) || !ms_zero(sid, e)) { host_say(g_hosts.of(who), L"SC_zero failed ship=" + std::to_wstring(sid) + L": " + e); return 0; }
             return 1;
         }
         catch (...) { return 0; }
