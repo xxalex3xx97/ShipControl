@@ -77,6 +77,7 @@ namespace
         // smooth follow: match = throttle controller state, yaw_o / pit_o = last aim offset sent (deg), flips = times (j.t) of thr sign changes in the last 4 s, last_sign = last non-zero thr sign.
         MatchState match;
         double yaw_o = 0.0, pit_o = 0.0;
+        double stall_t = 0.0, stall_log = 1.0;   // turn_stall probe: s of want>10 deg with rate<2, s since the last probe line
         std::vector<double> flips;
         int last_sign = 0;
         double turn_log = 0.0;
@@ -358,14 +359,26 @@ namespace
             bool aligned_now = false;
             const double vcap = quick ? (std::min)(20.0 * (j.turn_pct > 0 ? j.turn_pct : 150) / 100.0, 60.0) : SM_VIEW_MAX_DEG;
             if (quick && j.follow && j.ff_valid) view_offset_follow(err, aim.a_body, j.yaw_o, j.pit_o, vdt, vcap, yaw, pit, aligned_now);
+            else if (quick) view_offset_quick(err, aim.a_body, vcap, yaw, pit, aligned_now);
             else view_offset(err, aim.a_body, yaw, pit, aligned_now, vcap);
+            bool sent_clamped = false;
+            if (quick && (std::max)(std::fabs(yaw), std::fabs(pit)) > SC_VIEW_AXIS_MAX_DEG) { view_clamp_axes(yaw, pit); sent_clamped = true; }
+            // stall probe: want > 10 deg and rate < 2 deg/s for > 0.3 s (job_age < 0.5 = restart artefact, else a real stall), at most once per s
+            j.stall_log += vdt;
+            if (err > 10.0 && j.rate < 2.0) j.stall_t += vdt; else j.stall_t = 0.0;
+            if (j.stall_t > 0.3 && j.stall_log >= 1.0)
+            {
+                j.stall_log = 0.0;
+                host_logw(h, L"PROBE ShipControl turn_stall ship=" + std::to_wstring(sid) + L" want=" + std::to_wstring(err) + L" got=" + std::to_wstring(j.rate) + L" yaw=" + std::to_wstring(yaw) +
+                                 L" pit=" + std::to_wstring(pit) + L" sent_clamped=" + std::to_wstring(sent_clamped ? 1 : 0) + L" job_age=" + std::to_wstring(j.t));
+            }
             j.yaw_o = yaw;
             j.pit_o = pit;
             if (j.turn_log >= 0.5)
             {
                 j.turn_log = 0.0;
                 host_logw(h, L"PROBE ShipControl turn ship=" + std::to_wstring(sid) + L" want=" + std::to_wstring(err) + L" yaw=" + std::to_wstring(yaw) + L" pit=" + std::to_wstring(pit) +
-                                 L" got=" + std::to_wstring(j.rate) + L" ph=" + std::to_wstring(j.phase) + L" t=" + std::to_wstring(j.t));
+                                 L" got=" + std::to_wstring(j.rate) + L" sc=" + std::to_wstring(j.profile) + L" ph=" + std::to_wstring(j.phase) + L" t=" + std::to_wstring(j.t));
             }
             std::wstring e;
             if (aligned_now)

@@ -356,6 +356,47 @@ namespace
         pit = std::clamp(mag * (-a[1]) / n, prev_pit - lim, prev_pit + lim);
     }
 
+    // ---- quick profile turn mapping (escorts / defenders / attackers). The game turn rate is about 1 deg/s per deg of offset (first order), capped near 52-57 deg/s. ----
+    // WHAT: error above this (deg): offset = full cap (bang-bang part).
+    constexpr double SQ_TURN_FULL_DEG = 8.0;
+    // WHAT: below SQ_TURN_FULL_DEG the offset is max(err * SQ_TURN_K, SQ_TURN_MIN_DEG).
+    constexpr double SQ_TURN_K = 3.5;
+    constexpr double SQ_TURN_MIN_DEG = 10.0;
+    // WHAT: below this error (deg) the offset is at most err * SQ_TURN_TAPER (overshoot guard).
+    constexpr double SQ_TURN_TAPER_DEG = 5.0;
+    constexpr double SQ_TURN_TAPER = 6.0;
+    // WHAT: never send a zero offset while err is above this (deg): minimum magnitude SQ_TURN_NOZERO_MIN_DEG.
+    constexpr double SQ_TURN_NOZERO_ERR_DEG = 3.0;
+    constexpr double SQ_TURN_NOZERO_MIN_DEG = 3.0;
+    // WHAT: per-axis view offset limit (deg) = nav-note FlightModel MaxSteeringDegrees. UNVERIFIED live (whether the game clamps or ignores a larger axis).
+    constexpr double SC_VIEW_AXIS_MAX_DEG = 40.0;
+
+    // WHAT: scales (yaw, pit) together so max(|yaw|, |pit|) <= SC_VIEW_AXIS_MAX_DEG (direction kept).
+    inline void view_clamp_axes(double& yaw, double& pit)
+    {
+        const double m = (std::max)(std::fabs(yaw), std::fabs(pit));
+        if (m > SC_VIEW_AXIS_MAX_DEG) { const double k = SC_VIEW_AXIS_MAX_DEG / m; yaw *= k; pit *= k; }
+    }
+
+    // WHAT: quick profile aim offset. err < SM_FACE_DONE_DEG: 0, aligned. Else mag = err > SQ_TURN_FULL_DEG ? max_deg : max(err * K, MIN) (<= err * TAPER when
+    //       err < SQ_TURN_TAPER_DEG), <= max_deg; direction = rotation axis a (body); an undefined axis (|a| ~ 0) with err > SQ_TURN_NOZERO_ERR_DEG sends yaw = mag
+    //       (never a zero offset); the vector is then scaled to SC_VIEW_AXIS_MAX_DEG per axis.
+    inline void view_offset_quick(double err, const double a[3], double max_deg, double& yaw, double& pit, bool& aligned)
+    {
+        aligned = err < SM_FACE_DONE_DEG;
+        yaw = 0.0;
+        pit = 0.0;
+        if (aligned) return;
+        double mag = err > SQ_TURN_FULL_DEG ? max_deg : (std::max)(err * SQ_TURN_K, SQ_TURN_MIN_DEG);
+        if (err < SQ_TURN_TAPER_DEG) mag = (std::min)(mag, err * SQ_TURN_TAPER);
+        mag = (std::min)(mag, max_deg);
+        if (err > SQ_TURN_NOZERO_ERR_DEG) mag = (std::max)(mag, SQ_TURN_NOZERO_MIN_DEG);
+        const double n = std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+        if (n <= 1e-9) { if (err > SQ_TURN_NOZERO_ERR_DEG) yaw = mag; }
+        else { yaw = mag * a[2] / n; pit = mag * (-a[1]) / n; }
+        view_clamp_axes(yaw, pit);
+    }
+
     // WHAT: surface distance (m) to a target: |tgt - ship| - rad_m. Points in m. rad_m = 0 for points and ore.
     inline double remain_dist_m(const double ship_m[3], const double tgt_m[3], double rad_m)
     {

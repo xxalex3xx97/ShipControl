@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.1
+
+- Quick profile turn mapping (`view_offset_quick`): offset = full cap (`min(20*turn_pct/100, 60)`) while err > `SQ_TURN_FULL_DEG` (8); below that `max(err*SQ_TURN_K (3.5), SQ_TURN_MIN_DEG (10))`, and `<= err*SQ_TURN_TAPER (6)` when err < 5. Before: `min(err+7, cap)`, which gave about 22 deg offset at 15 deg error and a slow tail (9-15 deg/s). Careful profile unchanged.
+- The quick offset vector is scaled (both axes by the same factor) so no axis exceeds `SC_VIEW_AXIS_MAX_DEG` (40, nav-note MaxSteeringDegrees, UNVERIFIED live). A degenerate rotation axis with err > 3 deg sends yaw = mag instead of a zero offset (min 3 deg).
+- New probe `PROBE ShipControl turn_stall ship= want= got= yaw= pit= sent_clamped= job_age=` (want > 10 deg, got < 2 deg/s for > 0.3 s, at most 1/s). The turn line gets `sc=<profile>`. `got` is 0 for the first 0.25 s of a job (rate sample window), so job_age < 0.5 is a restart artefact.
+- API level 7 unchanged.
+
 ## 0.6.0
 
 - API 7: `ScMoveReq` grows to 160 bytes: `ff_cms` (off 144, captain speed along the line ship -> goal, cm/s, signed), `follow` (off 148), `ff_valid` (off 152), `pad` (off 156). `SC_move_start` accepts 128, 144 and 160 byte structs (missing fields are zero: old behaviour).

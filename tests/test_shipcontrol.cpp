@@ -471,6 +471,65 @@ static void t_follow_smooth()
     CHECK(NEARB(yaw, 10.0, 1e-9));                                        // proportional target 10 deg reached
     view_offset_follow(45.0, up, 0.0, 0.0, 0.1, 30.0, yaw, pit, al);
     CHECK(NEARB(yaw, 30.0, 1e-9));                                        // big error: hard turn, no slew
+    // quick turn mapping
+    view_offset_quick(1.9, up, 60.0, yaw, pit, al);
+    CHECK(al && yaw == 0.0 && pit == 0.0);
+    view_offset_quick(15.0, up, 60.0, yaw, pit, al);
+    CHECK(!al && NEARB(yaw, 40.0, 1e-9) && NEARB(pit, 0.0, 1e-9));       // full cap 60 clamped to the 40 axis limit
+    view_offset_quick(15.0, up, 30.0, yaw, pit, al);
+    CHECK(NEARB(yaw, 30.0, 1e-9));
+    view_offset_quick(6.0, up, 60.0, yaw, pit, al);
+    CHECK(NEARB(yaw, 21.0, 1e-9));                                        // 6 * 3.5
+    view_offset_quick(2.5, up, 60.0, yaw, pit, al);
+    CHECK(NEARB(yaw, 10.0, 1e-9));                                        // min 10 (taper 15)
+    view_offset_quick(1.99, up, 60.0, yaw, pit, al);
+    CHECK(al);
+    const double dg[3] = {0, 0, 0};
+    view_offset_quick(47.0, dg, 60.0, yaw, pit, al);
+    CHECK(!al && (yaw != 0.0 || pit != 0.0));                             // never an all-zero offset at a big error
+    {   // vector scaled, direction kept: axis (0, -0.6, 0.8) -> yaw 0.8 mag, pit 0.6 mag
+        const double ax[3] = {0.0, -0.6, 0.8};
+        view_offset_quick(47.0, ax, 60.0, yaw, pit, al);
+        CHECK(NEARB(yaw, 40.0, 1e-9) && NEARB(pit, 30.0, 1e-9));
+        double y2 = 10.0, p2 = 80.0;
+        view_clamp_axes(y2, p2);
+        CHECK(NEARB(p2, 40.0, 1e-9) && NEARB(y2, 5.0, 1e-9));
+    }
+    for (double e = 0.0; e < 180.0; e += 0.5)                             // every axis always within the limit
+        for (double ang = 0.0; ang < 6.3; ang += 0.3)
+        {
+            const double ax[3] = {0.0, -std::sin(ang), std::cos(ang)};
+            view_offset_quick(e, ax, 60.0, yaw, pit, al);
+            CHECK(std::fabs(yaw) <= SC_VIEW_AXIS_MAX_DEG + 1e-9 && std::fabs(pit) <= SC_VIEW_AXIS_MAX_DEG + 1e-9);
+            if (e > SQ_TURN_NOZERO_ERR_DEG) CHECK(std::hypot(yaw, pit) >= SQ_TURN_NOZERO_MIN_DEG - 1e-9);
+        }
+    {   // 90 deg turn, first-order model rate = min(offset, 52), 0.1 s steps: new mapping beats old (min(err+7, 60)), overshoot < 3
+        double tn = -1.0, to = -1.0, ovn = 0.0, ovo = 0.0;
+        for (int mode = 0; mode < 2; ++mode)
+        {
+            double e = 90.0, t = 0.0, over = 0.0, t3 = -1.0;
+            for (int i = 0; i < 600; ++i)
+            {
+                if (e < 3.0 && t3 < 0.0) t3 = t;
+                double off = 0.0;
+                if (e >= SM_FACE_DONE_DEG || e <= -SM_FACE_DONE_DEG)
+                {
+                    const double ae = std::fabs(e);
+                    if (mode == 0) { view_offset_quick(ae, up, 60.0, yaw, pit, al); off = yaw; }
+                    else off = (std::min)(ae + SM_VIEW_DEADZONE_DEG, 60.0);
+                    off *= e > 0 ? 1.0 : -1.0;
+                }
+                const double rate = (std::min)(std::fabs(off), 52.0) * (off < 0 ? -1.0 : 1.0);
+                e -= rate * 0.1;
+                t += 0.1;
+                if (e < 0.0) over = (std::max)(over, -e);
+            }
+            if (mode == 0) { tn = t3; ovn = over; } else { to = t3; ovo = over; }
+        }
+        CHECK(tn > 0.0 && to > 0.0 && tn < to);
+        CHECK(ovn < 3.0);
+        (void)ovo;
+    }
 }
 
 static void t_approach_step()
