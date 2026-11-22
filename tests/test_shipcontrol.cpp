@@ -254,6 +254,69 @@ static void t_approach_step_quick()
     }
 }
 
+static void t_quick_match()
+{
+    // args: err, v_cap, v_own, vmax_est, cap, thr_prev, kp, kd, band, brake_pct, overshoot
+    auto M = [](double err, double vc, double vo, double vm, int cap, int tp) { return quick_match_throttle(err, vc, vo, vm, cap, tp, SQ_KP, SQ_KD, SQ_BAND_M, 100, 10); };
+    CHECK(M(0.0, 0.0, 0.0, 100.0, 10, 0).thr == 0);                  // captain stopped, in band
+    CHECK(M(2.0, 0.0, 0.0, 100.0, 10, 0).thr == 0);                  // small P term does not move it
+    CHECK(M(0.0, 50.0, 50.0, 100.0, 10, 5).thr == 5);               // captain at 50% of vmax: step 5
+    CHECK(M(0.0, 50.0, 50.0, 200.0, 10, 5).thr == 3 && M(0.0, 50.0, 50.0, 100.0, 10, 5).thr != M(0.0, 50.0, 50.0, 200.0, 10, 5).thr);   // vmax_est matters
+    CHECK(M(500.0, 40.0, 40.0, 100.0, 10, 4).thr == 10);            // far behind: full throttle
+    CHECK(M(500.0, 40.0, 40.0, 100.0, 5, 4).thr == 5);              // cap
+    CHECK(!M(500.0, 40.0, 40.0, 100.0, 10, 4).done);
+    CHECK(M(-50.0, 0.0, 30.0, 100.0, 10, 3).thr == -10);            // overshot, fast: hard brake
+    CHECK(M(-50.0, 0.0, 10.0, 100.0, 10, 3).thr < 0 && M(-50.0, 0.0, 10.0, 100.0, 10, 3).thr >= -4);   // slower: limited reverse
+    CHECK(M(-50.0, 40.0, 60.0, 100.0, 10, 3).thr < 0);              // ahead of the slot and faster than the captain: negative
+    CHECK(M(-3.0, 40.0, 40.0, 100.0, 10, 4).thr >= 0);              // slightly ahead, same speed: no reverse
+    CHECK(M(30.0, 0.0, 70.0, 100.0, 10, -10).thr == -10);           // hysteresis: still braking while v_own > v_des
+    CHECK(M(200.0, 0.0, 70.0, 100.0, 10, -10).thr > 0);             // v_des 100 > v_own: release
+    for (double e = -300.0; e <= 600.0; e += 13.0)
+        for (double vc = -20.0; vc <= 120.0; vc += 10.0)
+            for (double vo = 0.0; vo <= 200.0; vo += 10.0)
+                for (int tp = -10; tp <= 10; tp += 5)
+                {
+                    const int t = M(e, vc, vo, 100.0, 6, tp).thr;
+                    CHECK(t >= -10 && t <= 6);
+                }
+    // 1D sim: speed follows thr*vmax/10 with a 0.8 s lag (10 Hz); captain at v_c; ship starts 200 m behind its slot
+    for (double vc : {40.0, 0.0})
+    {
+        double cap_pos = 200.0, pos = 0.0, v = 0.0, vmax = 100.0, vmax_est = 100.0, maxneg = 0.0, steady = 0.0, mint = 0.0;
+        int thr = 0, last = 0, full_ticks = 0;
+        for (int i = 0; i < 1500; ++i)
+        {
+            const double err = cap_pos - pos;
+            thr = quick_match_throttle(err, vc, v, vmax_est, 10, thr, SQ_KP, SQ_KD, SQ_BAND_M, 100, 10).thr;
+            steady = std::abs(thr - last) <= 1 ? steady + 0.1 : 0.0;
+            last = thr;
+            if (thr >= 10) ++full_ticks;
+            mint = (std::min)(mint, static_cast<double>(thr));
+            v += (thr * vmax / 10.0 - v) * (0.1 / 0.8);
+            if (v < 0.0) v = 0.0;                                           // closing speed is not negative
+            pos += v * 0.1;
+            cap_pos += vc * 0.1;
+            maxneg = (std::min)(maxneg, cap_pos - pos);
+        }
+        const double err = cap_pos - pos;
+        CHECK(std::fabs(err) < SQ_BAND_M);                                  // converged in the band
+        CHECK(thr == static_cast<int>(std::lround(vc / vmax * 10.0)) || std::abs(thr - vc / vmax * 10.0) <= 1.0);   // holds the captain speed
+        CHECK(maxneg > -2.0 * 10.0);                                        // never rams (err >= -2 * overshoot_m)
+        CHECK(full_ticks < 400 && mint >= -10.0);                           // full throttle only for the catch-up
+        if (vc == 0.0) CHECK(v < 1.0);                                      // captain at rest: ends at rest
+    }
+    // vmax_est learning
+    double est = 100.0;
+    for (int i = 0; i < 60; ++i) est = vmax_learn(est, 100.0, 5, 40.0, 2.0);   // truth 80 m/s
+    CHECK(NEARB(est, 80.0, 1.0));
+    CHECK(vmax_learn(100.0, 100.0, 5, 40.0, 1.0) == 100.0);                 // not steady long enough
+    CHECK(vmax_learn(100.0, 100.0, 1, 40.0, 2.0) == 100.0 && vmax_learn(100.0, 100.0, 5, 0.5, 2.0) == 100.0);
+    CHECK(vmax_learn(100.0, 100.0, 5, 400.0, 2.0) <= 200.0 + 1e-9);         // clamp holds at 2x init
+    est = 100.0;
+    for (int i = 0; i < 400; ++i) est = vmax_learn(est, 100.0, 2, 200.0, 2.0);
+    CHECK(NEARB(est, 200.0, 1e-9));
+}
+
 static void t_approach_step()
 {
     ApproachOut o = approach_step(5000.0, 0.0, 0.0, 10, false, 0, 0, 0.0, 0.25);
@@ -386,9 +449,9 @@ static void t_qcal_and_frame()
 // SC2b A2: move-job ABI sizes (also checked by static_asserts in sc_api.h) and the pure view raw conversion of sc_move.hpp.
 static void t_move_abi()
 {
-    CHECK(SC_API_LEVEL == 6);
+    CHECK(SC_API_LEVEL == 7);
     CHECK(sizeof(ScHost) == 112 && SC_HOST_SIZE_L2 == 24 && SC_HOST_SIZE_L3 == 80);
-    CHECK(sizeof(ScMoveReq) == 144 && SC_MOVEREQ_SIZE_L5 == 128 && sizeof(ScMoveStatus) == 64);
+    CHECK(sizeof(ScMoveReq) == 160 && SC_MOVEREQ_SIZE_L5 == 128 && SC_MOVEREQ_SIZE_L6 == 144 && sizeof(ScMoveStatus) == 64);
     CHECK(sc_view_raw(1.0) == 65536 && sc_view_raw(-0.5) == -32768 && sc_view_raw(0.0) == 0);   // llround of deg * 65536
     // SC3 A2 (API 4): level 4 structs
     CHECK(sizeof(ScBlockHit) == 56 && sizeof(ScBubbleProfile) == 72);
@@ -726,6 +789,7 @@ int main()
     t_phase1_steer();
     t_approach_step();
     t_approach_step_quick();
+    t_quick_match();
     t_view_and_ore();
     t_aim_and_rloc();
     t_qcal_and_frame();

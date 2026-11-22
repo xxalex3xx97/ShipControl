@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.0
+
+- API 7: `ScMoveReq` grows to 160 bytes: `ff_cms` (off 144, captain speed along the line ship -> goal, cm/s, signed), `follow` (off 148), `ff_valid` (off 152), `pad` (off 156). `SC_move_start` accepts 128, 144 and 160 byte structs (missing fields are zero: old behaviour).
+- Follow mode (quick profile, `follow` = 1 and `ff_valid` = 1): the job never finishes by itself. It matches the captain speed in the slot with normal throttle only (feed-forward + P on the slot error + speed-mismatch damping, hard brake on overshoot, brake hysteresis). Fleet cancels / restarts the job.
+- Per-ship max speed estimate (starts from the game limit, learned from steady throttle / speed, kept per ship id).
+- Log every 0.25 s: `ShipControl match ship=.. v_cap=.. v_own=.. thr=.. err=.. vmax_est=..`.
+- Not done: heading match in the slot (no aim-at-direction mode exists yet).
+
 ## 0.5.0
 
 - API 6: `ScMoveReq` grows from 128 to 144 bytes: `profile` (0 careful = unchanged default, 1 quick), `brake_pct`, `turn_pct`, `overshoot_m`. `SC_move_start` still accepts the 128-byte level 5 struct (careful profile).

@@ -66,6 +66,10 @@ namespace
         // level 6 quick profile: profile 1 = quick. v_close = closing speed EMA (m/s) from the distance change, prev_dist_m = last aim dist (-1 = none), vmax_ms = last known max speed, q_log = s since the last quick log line.
         int profile = 0, brake_pct = 0, turn_pct = 0, overshoot_m = 0;
         double prev_dist_m = -1.0, v_close = 0.0, vmax_ms = 0.0, q_log = 0.0;
+        // level 7 follow: ff_cms = captain speed along the line (cm/s), follow / ff_valid flags, vmax_init / vmax_est = max speed at step 10 (m/s, learned),
+        // thr_last / steady_t = last step and seconds it stayed within 1 step (learning gate).
+        int ff_cms = 0, follow = 0, ff_valid = 0, thr_last = 0;
+        double vmax_init = 0.0, vmax_est = 0.0, steady_t = 0.0;
     };
 
     // WHAT: a job that ended in this tick: its ship, command seq and result text. Delivered to on_move_done after the registry lock is released.
@@ -75,6 +79,8 @@ namespace
     std::map<int, ScJob> g_jobs_mv;
     // WHAT: aim trace counter, shared by all ships (legacy view_aim_drive static trace_n).
     int g_trace_n = 0;
+    // WHAT: learned max speed at step 10 per ship id (survives job restarts). ponytail: never pruned (a few bytes per ship id seen); prune by live ids if it ever grows.
+    std::map<int, double> g_vmax_est;
 
     // WHAT: aim offset raw value of deg (ViewRotation raw per degree = SM_VIEW_RAW_PER_DEG, rounded). Pure.
     // WHY: 1:1 with view_aim_drive (llround of deg * 65536).
@@ -295,6 +301,12 @@ namespace
             j.prev_dist_m = aim.dist_m;
             const double vm = (f.max_mod_raw > 0 ? f.max_mod_raw : f.max_base_raw) / SM_RAW_PER_M;
             if (vm > 0.0) j.vmax_ms = vm;
+            if (j.vmax_init <= 0.0)
+            {
+                j.vmax_init = j.vmax_ms > 0.0 ? j.vmax_ms : 100.0;
+                const auto kv = g_vmax_est.find(sid);
+                j.vmax_est = kv != g_vmax_est.end() ? std::clamp(kv->second, 0.5 * j.vmax_init, 2.0 * j.vmax_init) : j.vmax_init;
+            }
         }
         // 9. phase 1 (aim) ends
         if (j.phase == 1)
@@ -372,7 +384,37 @@ namespace
             if (m != g_spd.mon.end() && m->second.have) v_ms = m->second.v / SM_RAW_PER_M;
         }
         ApproachOut o;
-        if (quick)
+        if (quick && j.follow && j.ff_valid)
+        {
+            // follow: own speed = speed monitor magnitude when it has a sample, else the closing speed (the goal is fixed during a job, Fleet restarts it).
+            // The monitor is total speed, so sideways drift counts as forward; thrust is held at 0 above SQ_HEAD_DEG anyway.
+            double v_own = j.v_close;
+            if (g_spd.watch.count(sid))
+            {
+                auto m = g_spd.mon.find(sid);
+                if (m != g_spd.mon.end() && m->second.have) v_own = std::fabs(m->second.v) / SM_RAW_PER_M;
+            }
+            v_ms = v_own;
+            const double v_cap = j.ff_cms / 100.0;
+            const double slot = err > 90.0 ? -remaining : remaining;   // goal behind the nose = overshot the slot
+            const int cap = lowpower_throttle_cap((std::min)(SM_APPROACH_MAX_THR, j.steps), lp, lp_thr);
+            int thr = 0;
+            if (err > SQ_HEAD_DEG && err <= 90.0) thr = 0;   // turn first, hold the throttle
+            else thr = quick_match_throttle(slot, v_cap, v_own, j.vmax_est, cap, j.thr, SQ_KP, SQ_KD, SQ_BAND_M, j.brake_pct, j.overshoot_m).thr;
+            j.steady_t = std::abs(thr - j.thr_last) <= 1 ? j.steady_t + dt : 0.0;
+            j.thr_last = thr;
+            j.vmax_est = vmax_learn(j.vmax_est, j.vmax_init, thr, v_own, j.steady_t);
+            g_vmax_est[sid] = j.vmax_est;
+            o = ApproachOut{thr, 0.0, thr, false};
+            j.q_log += dt;
+            if (j.q_log >= 0.25)
+            {
+                j.q_log = 0.0;
+                host_logw(h, L"ShipControl match ship=" + std::to_wstring(sid) + L" v_cap=" + std::to_wstring(v_cap) + L" v_own=" + std::to_wstring(v_own) +
+                                 L" thr=" + std::to_wstring(thr) + L" err=" + std::to_wstring(slot) + L" vmax_est=" + std::to_wstring(j.vmax_est));
+            }
+        }
+        else if (quick)
         {
             v_ms = j.v_close;
             const QuickOut q = approach_step_quick(remaining, v_ms, err, j.steps, lp, lp_thr, j.thr, j.vmax_ms > 0.0 ? j.vmax_ms : 100.0, j.brake_pct, j.overshoot_m);
@@ -492,6 +534,9 @@ namespace
         j.brake_pct = req.brake_pct;
         j.turn_pct = req.turn_pct;
         j.overshoot_m = req.overshoot_m;
+        j.ff_cms = req.ff_cms;
+        j.follow = req.follow == 1 ? 1 : 0;
+        j.ff_valid = req.ff_valid == 1 ? 1 : 0;
         j.phase = 1;
         j.owner = owner;
         if (f.flags & FF_OBJ_POSE) std::memcpy(j.qs, f.quat, sizeof(j.qs));

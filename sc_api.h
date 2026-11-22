@@ -19,7 +19,7 @@
 extern "C" {
 #endif
 
-#define SC_API_LEVEL 6
+#define SC_API_LEVEL 7
 
 /* wchar_t must be 16-bit (Windows) to match the DLL */
 #ifdef __cplusplus
@@ -137,8 +137,14 @@ struct ScMoveReq
     int32_t brake_pct;   /* off 132: quick: braking strength %, 0 = 100 */
     int32_t turn_pct;    /* off 136: quick: aim offset cap % of 20 deg, 0 = 150 */
     int32_t overshoot_m; /* off 140: quick: metres past the goal tolerated */
+    /* level 7: speed match in the slot (quick profile). A client that sends size 128 or 144 gets zeros here. */
+    int32_t ff_cms;      /* off 144: captain speed ALONG the line ship -> goal, cm/s, signed */
+    int32_t follow;      /* off 148: 1 = follow: never finishes, matches the captain speed in the slot (needs ff_valid 1) */
+    int32_t ff_valid;    /* off 152: 1 = ff_cms is valid */
+    int32_t pad;         /* off 156 */
 };
 #define SC_MOVEREQ_SIZE_L5 128
+#define SC_MOVEREQ_SIZE_L6 144
 
 /* ScMoveStatus: size = sizeof(ScMoveStatus). phase 1 aim, 2 approach. err_deg -1 = none yet. kind as ScMoveReq.kind. */
 struct ScMoveStatus
@@ -242,12 +248,13 @@ static_assert(offsetof(ScBubbleStatus, why) == 36 && offsetof(ScBubbleStatus, ro
 static_assert(offsetof(ScHost, size) == 0 && offsetof(ScHost, log) == 8 && offsetof(ScHost, on_speed_abort) == 16, "ScHost level 2 offsets");
 static_assert(offsetof(ScHost, tlog) == 24 && offsetof(ScHost, on_move_done) == 32 && offsetof(ScHost, warp_begin) == 40, "ScHost level 3 offsets");
 static_assert(offsetof(ScHost, remain_m) == 48 && offsetof(ScHost, target_ok) == 56 && offsetof(ScHost, ore_loc) == 64 && offsetof(ScHost, braking) == 72, "ScHost callback offsets");
-static_assert(sizeof(ScMoveReq) == 144 && SC_MOVEREQ_SIZE_L5 == 128 && offsetof(ScMoveReq, profile) == 128, "ScMoveReq API 6 size");
+static_assert(sizeof(ScMoveReq) == 160 && SC_MOVEREQ_SIZE_L5 == 128 && SC_MOVEREQ_SIZE_L6 == 144 && offsetof(ScMoveReq, profile) == 128, "ScMoveReq API 7 size");
 static_assert(offsetof(ScMoveReq, size) == 0 && offsetof(ScMoveReq, kind) == 4 && offsetof(ScMoveReq, seq) == 8 && offsetof(ScMoveReq, mode) == 12, "ScMoveReq header offsets");
 static_assert(offsetof(ScMoveReq, sys) == 16 && offsetof(ScMoveReq, tag) == 20 && offsetof(ScMoveReq, ch) == 24 && offsetof(ScMoveReq, loc) == 48, "ScMoveReq chunk offsets");
 static_assert(offsetof(ScMoveReq, pt_uu) == 72 && offsetof(ScMoveReq, handle) == 96 && offsetof(ScMoveReq, radius_m) == 104 && offsetof(ScMoveReq, stop_m) == 112, "ScMoveReq target offsets");
 static_assert(offsetof(ScMoveReq, out_cid) == 120 && offsetof(ScMoveReq, out_steps) == 124, "ScMoveReq out offsets");
 static_assert(offsetof(ScMoveReq, brake_pct) == 132 && offsetof(ScMoveReq, turn_pct) == 136 && offsetof(ScMoveReq, overshoot_m) == 140, "ScMoveReq level 6 offsets");
+static_assert(offsetof(ScMoveReq, ff_cms) == 144 && offsetof(ScMoveReq, follow) == 148 && offsetof(ScMoveReq, ff_valid) == 152 && offsetof(ScMoveReq, pad) == 156, "ScMoveReq level 7 offsets");
 static_assert(sizeof(ScMoveStatus) == 64, "ScMoveStatus API 3 size");
 static_assert(offsetof(ScMoveStatus, size) == 0 && offsetof(ScMoveStatus, active) == 4 && offsetof(ScMoveStatus, phase) == 8, "ScMoveStatus header offsets");
 static_assert(offsetof(ScMoveStatus, warp_wait) == 12 && offsetof(ScMoveStatus, thr) == 16 && offsetof(ScMoveStatus, kind) == 20, "ScMoveStatus state offsets");

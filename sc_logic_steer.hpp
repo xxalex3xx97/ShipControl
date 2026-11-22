@@ -184,6 +184,50 @@ namespace
         return o;
     }
 
+    // ---- QUICK + follow (API 6/7): match the captain's speed in the slot with normal throttle only. ----
+    // WHAT: position gain (1/s, ~ 1/SQ_TAU_S), speed-mismatch gain, in-slot band (m).
+    constexpr double SQ_KP = 0.5;
+    constexpr double SQ_KD = 0.1;
+    constexpr double SQ_BAND_M = 5.0;
+
+    // WHAT: result of quick_match_throttle. done is always false (follow never finishes by itself; the caller cancels / restarts the job).
+    struct MatchOut { int thr; bool done; };
+
+    // WHAT: Throttle step that holds the captain's speed in the slot. slot_err_m = distance still to go along the line (>0 = goal ahead);
+    //       v_cap_ms = captain speed along that line; v_own_ms = own forward speed (>= 0); vmax_est_ms = own max speed at step 10;
+    //       steps_cap = highest step allowed (already low-power capped); thr_prev = last written step (brake hysteresis);
+    //       kp (1/s) position gain, kd speed-mismatch gain, band_m = |err| inside which the P term stays small, brake_pct scales kp (<=0 = 100),
+    //       overshoot_m = metres past the slot before a position reverse is allowed.
+    //       v_des = clamp(v_cap + kp*err, -0.3 vmax, vmax); v_cmd = v_des - kd*(v_own - v_cap); thr = round(10 v_cmd / vmax) in [0, cap].
+    //       Negative thr only to kill speed: v_own > v_des + band (hard brake, -10 above 25% vmax, -4 above 5%, else -2; held while v_own > v_des),
+    //       or v_cmd < 0 with err < -overshoot_m (limited to the same tiers). Inside band_m the captain speed is held: thr = feed-forward round(10 v_cap / vmax) + small P.
+    inline MatchOut quick_match_throttle(double slot_err_m, double v_cap_ms, double v_own_ms, double vmax_est_ms, int steps_cap, int thr_prev, double kp, double kd, double band_m, int brake_pct, int overshoot_m)
+    {
+        (void)band_m;   // the band is implicit: v_des = v_cap + kp*err is already the captain speed plus a small P term when err is small
+        const int cap = std::clamp(steps_cap, 0, SM_APPROACH_MAX_THR);
+        const double vmax = (std::max)(vmax_est_ms, 1.0);
+        const double kpe = kp * (brake_pct > 0 ? brake_pct : 100) / 100.0;
+        const double v_des = std::clamp(v_cap_ms + kpe * slot_err_m, -0.3 * vmax, vmax);
+        const double v_cmd = v_des - kd * (v_own_ms - v_cap_ms);
+        const int thr_raw = static_cast<int>(std::lround(10.0 * v_cmd / vmax));
+        const double vband = (std::max)(10.0, 0.1 * vmax);
+        const int hard = v_own_ms > 0.25 * vmax ? -10 : (v_own_ms > 0.05 * vmax ? -4 : -2);
+        int thr;
+        if (thr_prev < 0) thr = v_own_ms > v_des ? hard : std::clamp(thr_raw, 0, cap);
+        else if (v_own_ms > v_des + vband) thr = hard;
+        else if (thr_raw < 0) thr = slot_err_m < -static_cast<double>(overshoot_m) ? (std::max)(thr_raw, hard) : 0;
+        else thr = (std::min)(thr_raw, cap);
+        return MatchOut{std::clamp(thr, -10, cap), false};
+    }
+
+    // WHAT: learns the max speed at step 10 (m/s). Steady throttle (>= 1.5 s within 1 step), thr >= 2, v_own >= 1: ratio = v_own / (thr/10),
+    //       EMA 0.2 into est, clamped to 0.5x..2x of init. Otherwise est unchanged.
+    inline double vmax_learn(double est, double init, int thr, double v_own_ms, double steady_s)
+    {
+        if (steady_s < 1.5 || thr < 2 || v_own_ms < 1.0 || init <= 0.0) return est;
+        return std::clamp(0.8 * est + 0.2 * (v_own_ms / (thr / 10.0)), 0.5 * init, 2.0 * init);
+    }
+
     // WHAT: the ore actor is re-read when within SM_ORE_REFRESH_M (m) and not read yet, or the last read is 1 s old.
     inline bool ore_refresh_due(double dist_m, bool fresh, double ore_t) { return dist_m <= SM_ORE_REFRESH_M && (!fresh || ore_t >= 1.0); }
 

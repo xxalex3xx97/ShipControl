@@ -120,7 +120,7 @@ extern "C"
     // WHAT: API level (sc_api.h SC_API_LEVEL). Callers refuse to run below the level they need.
     SHIP_CONTROL_API int SC_api()
     {
-        try { return 6; }
+        try { return 7; }
         catch (...) { return 0; }
     }
 
@@ -346,8 +346,8 @@ extern "C"
         try
         {
             if (!owner || !*owner || !req) { put_err("error: bad move request", err, errlen); return 0; }
-            if (req->size != SC_MOVEREQ_SIZE_L5 && req->size != static_cast<int32_t>(sizeof(ScMoveReq))) { put_err("error: bad move request size", err, errlen); return 0; }
-            // level 5 client: its struct ends at 128 bytes, so work on a zeroed 144-byte copy (careful profile) and never touch memory past 128
+            if (req->size != SC_MOVEREQ_SIZE_L5 && req->size != SC_MOVEREQ_SIZE_L6 && req->size != static_cast<int32_t>(sizeof(ScMoveReq))) { put_err("error: bad move request size", err, errlen); return 0; }
+            // older client: its struct ends at 128 / 144 bytes, so work on a zeroed 160-byte copy (careful profile, no follow) and never touch memory past 128
             ScMoveReq full;
             std::memset(&full, 0, sizeof(full));
             std::memcpy(&full, req, static_cast<size_t>(req->size));
