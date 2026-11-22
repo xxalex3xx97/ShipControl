@@ -197,6 +197,63 @@ static void t_phase1_steer()
     CHECK(phase1_decide(true, 10.0, 0.0) == P1_NONE);
 }
 
+static void t_approach_step_quick()
+{
+    // args: remaining, v, err, cap, lp, lp_thr, thr_prev, vmax, brake_pct, overshoot
+    QuickOut q = approach_step_quick(5000.0, 0.0, 0.0, 10, false, 0, 0, 100.0, 100, 0);
+    CHECK(q.thr == 10 && q.target == 10 && !q.done);                       // far: full throttle at once, no ramp
+    q = approach_step_quick(30.0, 80.0, 0.0, 10, false, 0, 10, 100.0, 100, 0);
+    CHECK(q.thr == -10);                                                   // want_v 15, v 80 > 25: hard brake
+    q = approach_step_quick(-5.0, 50.0, 0.0, 10, false, 0, 10, 100.0, 100, 0);
+    CHECK(q.thr == -10 && !q.done);                                        // past the goal, fast
+    q = approach_step_quick(10.0, 50.0, 0.0, 10, false, 0, 10, 100.0, 100, 20);
+    CHECK(q.thr == -10);                                                   // overshoot_m eats the remaining
+    q = approach_step_quick(0.0, 5.0, 0.0, 10, false, 0, 3, 100.0, 100, 0);
+    CHECK(q.thr == -2 && !q.done);                                         // past the goal, slow: gentle reverse
+    q = approach_step_quick(0.0, 20.0, 0.0, 10, false, 0, 3, 100.0, 100, 0);
+    CHECK(q.thr == -4);
+    q = approach_step_quick(0.0, 0.5, 0.0, 10, false, 0, -2, 100.0, 100, 0);
+    CHECK(q.done && q.thr == 0);
+    q = approach_step_quick(5000.0, 0.0, 40.0, 10, false, 0, 5, 100.0, 100, 0);
+    CHECK(q.target == 0 && q.thr == 0);                                    // err > 30
+    q = approach_step_quick(200.0, 90.0, 0.0, 10, false, 0, -10, 100.0, 100, 0);   // want_v 100 -> v 90 <= want_v
+    CHECK(q.thr > 0);                                                      // release
+    q = approach_step_quick(100.0, 90.0, 0.0, 10, false, 0, -10, 100.0, 100, 0);   // want_v 50, v 90 > 50
+    CHECK(q.thr == -10);                                                   // keeps braking
+    q = approach_step_quick(5000.0, 0.0, 0.0, 10, true, 3, 0, 100.0, 100, 0);
+    CHECK(q.thr == 3 && q.target == 3);                                    // low-power cap
+    q = approach_step_quick(5000.0, 0.0, 0.0, 4, false, 0, 0, 100.0, 100, 0);
+    CHECK(q.thr == 4);                                                     // steps cap
+    for (double rem = -50.0; rem <= 3000.0; rem += 7.0)
+        for (double v = 0.0; v <= 150.0; v += 5.0)
+            for (int tp = -10; tp <= 10; tp += 5)
+            {
+                q = approach_step_quick(rem, v, 0.0, 7, false, 0, tp, 100.0, 100, 0);
+                CHECK(q.thr >= -10 && q.thr <= 7);
+            }
+    // 1D sim: speed follows thr*vmax/10 with a first-order lag (0.8 s), 10 Hz, stop at 100 m; must not overshoot > overshoot_m, must not reverse
+    for (int os : {0, 10})
+    {
+        double pos = 0.0, v = 0.0, vmax = 100.0, minv = 0.0;
+        int thr = 0;
+        bool done = false;
+        for (int i = 0; i < 6000 && !done; ++i)
+        {
+            q = approach_step_quick(100.0 - pos, v, 0.0, 10, false, 0, thr, vmax, 100, os);
+            thr = q.thr;
+            done = q.done;
+            if (done) break;
+            v += (thr * vmax / 10.0 - v) * (0.1 / 0.8);
+            pos += v * 0.1;
+            minv = (std::min)(minv, v);
+        }
+        CHECK(done);
+        CHECK(pos <= 100.0 + os + 1e-9 || pos - (100.0 + os) < 1.0);         // within the tolerance (+1 m sample slack)
+        CHECK(minv > -SQ_DONE_MS - 1e-9);                                    // never really reverses
+        if (pos > 100.0 + os + 1e-9) std::printf("sim os=%d pos=%f\n", os, pos);
+    }
+}
+
 static void t_approach_step()
 {
     ApproachOut o = approach_step(5000.0, 0.0, 0.0, 10, false, 0, 0, 0.0, 0.25);
@@ -329,9 +386,9 @@ static void t_qcal_and_frame()
 // SC2b A2: move-job ABI sizes (also checked by static_asserts in sc_api.h) and the pure view raw conversion of sc_move.hpp.
 static void t_move_abi()
 {
-    CHECK(SC_API_LEVEL == 5);
+    CHECK(SC_API_LEVEL == 6);
     CHECK(sizeof(ScHost) == 112 && SC_HOST_SIZE_L2 == 24 && SC_HOST_SIZE_L3 == 80);
-    CHECK(sizeof(ScMoveReq) == 128 && sizeof(ScMoveStatus) == 64);
+    CHECK(sizeof(ScMoveReq) == 144 && SC_MOVEREQ_SIZE_L5 == 128 && sizeof(ScMoveStatus) == 64);
     CHECK(sc_view_raw(1.0) == 65536 && sc_view_raw(-0.5) == -32768 && sc_view_raw(0.0) == 0);   // llround of deg * 65536
     // SC3 A2 (API 4): level 4 structs
     CHECK(sizeof(ScBlockHit) == 56 && sizeof(ScBubbleProfile) == 72);
@@ -668,6 +725,7 @@ int main()
     t_power_dead_from();
     t_phase1_steer();
     t_approach_step();
+    t_approach_step_quick();
     t_view_and_ore();
     t_aim_and_rloc();
     t_qcal_and_frame();

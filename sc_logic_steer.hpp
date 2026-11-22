@@ -143,14 +143,55 @@ namespace
         return o;
     }
 
+    // ---- QUICK drive profile (escorts / defenders / attackers): no ramp, throttle jumps between steps, hard brake on the goal. ----
+    // WHAT: assumed seconds the ship needs to stop from vmax at 100% brake. CALIBRATE in game (unverified assumption).
+    constexpr double SQ_TAU_S = 2.0;
+    // WHAT: heading error above this (deg) holds the throttle at 0 in the quick profile.
+    constexpr double SQ_HEAD_DEG = 30.0;
+    // WHAT: quick profile done below this speed (m/s) once past the stop point.
+    constexpr double SQ_DONE_MS = 1.0;
+
+    // WHAT: result of approach_step_quick. thr = step to write now (-10..cap). target = step wanted. done = stopped past the point (caller ends the job).
+    struct QuickOut { int thr; bool done; int target; };
+
+    // WHAT: one QUICK approach step. remaining_m = surface - stop distance (m); v_ms = closing speed (m/s); err_deg = heading error; steps_cap = ship steps;
+    //       lp / lp_thr = low power and its cap; thr_prev = last written step (hysteresis); vmax_ms = max speed (m/s); brake_pct = braking strength (% of SQ_TAU_S model, <=0 = 100);
+    //       overshoot_m = metres past the goal that are tolerated before the hard brake.
+    //       rem = remaining - overshoot. rem <= 0: v < SQ_DONE_MS done, else -10 (v > 25% vmax), -4 (> 5%) or -2 (slow: no backing away).
+    //       Else want_v = rem / (SQ_TAU_S * brake_pct/100); want_step = ceil(want_v/vmax*10) capped. err > SQ_HEAD_DEG: 0.
+    //       Braking already (thr_prev < 0): -10 while v > want_v, then release to want_step. v > want_v + band: -10. Else want_step directly (no ramp).
+    inline QuickOut approach_step_quick(double remaining_m, double v_ms, double err_deg, int steps_cap, bool lp, int lp_thr, int thr_prev, double vmax_ms, int brake_pct, int overshoot_m)
+    {
+        const int cap = lowpower_throttle_cap((std::min)(SM_APPROACH_MAX_THR, steps_cap), lp, lp_thr);
+        QuickOut o{0, false, 0};
+        const double rem = remaining_m - overshoot_m;
+        if (rem <= 0.0)
+        {
+            if (v_ms < SQ_DONE_MS) { o.done = true; return o; }
+            o.thr = v_ms > 0.25 * vmax_ms ? -10 : (v_ms > 0.05 * vmax_ms ? -4 : -2);
+            o.target = o.thr;
+            return o;
+        }
+        const double bp = brake_pct > 0 ? brake_pct : 100;
+        const double want_v = rem / (SQ_TAU_S * bp / 100.0);
+        const int want_step = want_v >= vmax_ms ? cap : std::clamp(static_cast<int>(std::ceil(want_v / vmax_ms * 10.0)), 0, cap);
+        const double band = (std::max)(10.0, 0.1 * vmax_ms);
+        if (err_deg > SQ_HEAD_DEG) { o.thr = 0; o.target = 0; return o; }
+        o.target = want_step;
+        if (thr_prev < 0) o.thr = v_ms > want_v ? -10 : want_step;
+        else o.thr = v_ms > want_v + band ? -10 : want_step;
+        o.thr = std::clamp(o.thr, -10, (std::max)(cap, 0));
+        return o;
+    }
+
     // WHAT: the ore actor is re-read when within SM_ORE_REFRESH_M (m) and not read yet, or the last read is 1 s old.
     inline bool ore_refresh_due(double dist_m, bool fresh, double ore_t) { return dist_m <= SM_ORE_REFRESH_M && (!fresh || ore_t >= 1.0); }
 
     // WHAT: aim offset of one view send (view_aim_drive steps 2-4, mb_steer.hpp). err = heading error (deg); a = unit rotation axis in body axes.
     //       err < SM_FACE_DONE_DEG: yaw = pit = 0, aligned = true. Else mag = min(err + SM_VIEW_DEADZONE_DEG, SM_VIEW_MAX_DEG),
     //       yaw = mag * (a . Z) / |a|, pit = mag * (a . -Y) / |a| (yaw axis = body +Z, pitch axis = body -Y). |a| <= 1e-9 gives 0.
-    //       Always returns true: yaw / pit are written.
-    inline bool view_offset(double err, const double a[3], double& yaw_deg, double& pit_deg, bool& aligned)
+    //       max_deg = the offset cap (default SM_VIEW_MAX_DEG; quick profile passes more). Always returns true: yaw / pit are written.
+    inline bool view_offset(double err, const double a[3], double& yaw_deg, double& pit_deg, bool& aligned, double max_deg = SM_VIEW_MAX_DEG)
     {
         aligned = err < SM_FACE_DONE_DEG;
         yaw_deg = 0.0;
@@ -158,7 +199,7 @@ namespace
         if (aligned) return true;
         const double n = std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
         if (n <= 1e-9) return true;
-        const double mag = (std::min)(err + SM_VIEW_DEADZONE_DEG, SM_VIEW_MAX_DEG);
+        const double mag = (std::min)(err + SM_VIEW_DEADZONE_DEG, max_deg);
         yaw_deg = mag * a[2] / n;
         pit_deg = mag * (-a[1]) / n;
         return true;

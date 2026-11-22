@@ -63,6 +63,9 @@ namespace
         bool thr_warned = false;
         double ore_loc[3] = {0, 0, 0};
         std::string owner;
+        // level 6 quick profile: profile 1 = quick. v_close = closing speed EMA (m/s) from the distance change, prev_dist_m = last aim dist (-1 = none), vmax_ms = last known max speed, q_log = s since the last quick log line.
+        int profile = 0, brake_pct = 0, turn_pct = 0, overshoot_m = 0;
+        double prev_dist_m = -1.0, v_close = 0.0, vmax_ms = 0.0, q_log = 0.0;
     };
 
     // WHAT: a job that ended in this tick: its ship, command seq and result text. Delivered to on_move_done after the registry lock is released.
@@ -211,7 +214,7 @@ namespace
     {
         const int sid = j.sid;
         // 1. snapshot: POWER only for the approach (phase 2, not warping)
-        const int mask = FL_POSE | ((j.kind == 1 && j.phase == 2 && !j.warp_wait) ? FL_POWER : 0);
+        const int mask = FL_POSE | (j.profile == 1 ? FL_LIMITS : 0) | ((j.kind == 1 && j.phase == 2 && !j.warp_wait) ? FL_POWER : 0);
         MsFlight f;
         std::memset(&f, 0, sizeof(f));
         f.size = static_cast<int32_t>(sizeof(MsFlight));
@@ -284,10 +287,20 @@ namespace
         const double err = aim.err_deg;
         j.err = err;
         const bool approach = j.kind == 1;
+        const bool quick = j.profile == 1;
+        // quick: closing speed from the distance change (the speed monitor value is stale/slow), EMA 0.3, never below 0
+        if (quick)
+        {
+            if (j.prev_dist_m >= 0.0 && dt >= 0.005) j.v_close = 0.7 * j.v_close + 0.3 * (std::max)(0.0, (j.prev_dist_m - aim.dist_m) / dt);
+            j.prev_dist_m = aim.dist_m;
+            const double vm = (f.max_mod_raw > 0 ? f.max_mod_raw : f.max_base_raw) / SM_RAW_PER_M;
+            if (vm > 0.0) j.vmax_ms = vm;
+        }
         // 9. phase 1 (aim) ends
         if (j.phase == 1)
         {
-            const Phase1 p1 = phase1_decide(approach, err, j.pt);
+            Phase1 p1 = phase1_decide(approach, err, j.pt);
+            if (quick && approach && p1 == P1_NONE && err < SQ_HEAD_DEG) p1 = P1_TO_PHASE2;   // quick: start the approach at a wide error
             if (p1 == P1_FACE_OK) { finish_job(sid, L"ok heading_error=" + std::to_wstring(err) + L"deg", h, done, true); return; }
             if (p1 == P1_FACE_TIMEOUT) { finish_job(sid, L"error: face timeout err=" + std::to_wstring(err), h, done, true); return; }
             if (p1 == P1_TO_PHASE2)
@@ -304,7 +317,7 @@ namespace
             j.view_t = 0.0;
             double yaw = 0.0, pit = 0.0;
             bool aligned_now = false;
-            view_offset(err, aim.a_body, yaw, pit, aligned_now);
+            view_offset(err, aim.a_body, yaw, pit, aligned_now, quick ? (std::min)(20.0 * (j.turn_pct > 0 ? j.turn_pct : 150) / 100.0, 60.0) : SM_VIEW_MAX_DEG);
             std::wstring e;
             if (aligned_now)
             {
@@ -358,7 +371,21 @@ namespace
             auto m = g_spd.mon.find(sid);
             if (m != g_spd.mon.end() && m->second.have) v_ms = m->second.v / SM_RAW_PER_M;
         }
-        const ApproachOut o = approach_step(remaining, v_ms, err, j.steps, lp, lp_thr, j.thr, j.thr_t, dt);
+        ApproachOut o;
+        if (quick)
+        {
+            v_ms = j.v_close;
+            const QuickOut q = approach_step_quick(remaining, v_ms, err, j.steps, lp, lp_thr, j.thr, j.vmax_ms > 0.0 ? j.vmax_ms : 100.0, j.brake_pct, j.overshoot_m);
+            o = ApproachOut{q.thr, 0.0, q.target, q.done};
+            j.q_log += dt;
+            if (j.q_log >= 0.25)
+            {
+                j.q_log = 0.0;
+                host_logw(h, L"ShipControl quick ship=" + std::to_wstring(sid) + L" thr=" + std::to_wstring(q.thr) + L" target=" + std::to_wstring(q.target) +
+                                 L" v_close=" + std::to_wstring(v_ms) + L" remaining=" + std::to_wstring(remaining));
+            }
+        }
+        else o = approach_step(remaining, v_ms, err, j.steps, lp, lp_thr, j.thr, j.thr_t, dt);
         j.thr = o.thr;
         j.thr_t = o.thr_t;
         if (o.done)
@@ -461,6 +488,10 @@ namespace
         j.handle = req.handle;
         j.radius_m = req.radius_m;
         j.stop_m = req.stop_m;
+        j.profile = req.profile == 1 ? 1 : 0;
+        j.brake_pct = req.brake_pct;
+        j.turn_pct = req.turn_pct;
+        j.overshoot_m = req.overshoot_m;
         j.phase = 1;
         j.owner = owner;
         if (f.flags & FF_OBJ_POSE) std::memcpy(j.qs, f.quat, sizeof(j.qs));
