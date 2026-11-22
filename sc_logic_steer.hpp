@@ -187,7 +187,7 @@ namespace
     // ---- QUICK drive (combat roles): the ship stops instantly at throttle 0 (inertial dampeners), so the step comes straight from the distance. ----
     // WHAT: decision period (s); distance (m) from which the step is full (closer: proportional); stop / done distance (m).
     constexpr double SQ_STEP_S = 0.1;
-    constexpr double SQ_FULL_M = 300.0;
+    constexpr double SQ_FULL_M = 60.0;
     constexpr double SQ_STOP_M = 3.0;
 
     // WHAT: true once acc (s) has reached period; acc then resets to 0. Adds dt first.
