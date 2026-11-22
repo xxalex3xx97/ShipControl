@@ -382,6 +382,21 @@ extern "C"
         catch (...) { return 0; }
     }
 
+    // WHAT: API 7. Rewrites the goal (sys, ch[3], loc[3], pt_uu[3]; null = unchanged) and the follow feed-forward (ff_cms, ff_valid) of the running move job of ship sid
+    //       for owner, in place: phase, throttle, aim state and speed estimates keep running. 1 = updated, 0 = no job / other owner / killed (the caller then uses SC_move_start).
+    SHIP_CONTROL_API int SC_move_goal(const char* owner, int sid, int sys, const int64_t* ch, const double* loc, const double* pt_uu, int ff_cms, int ff_valid)
+    {
+        try
+        {
+            if (!owner || !*owner) return 0;
+            const std::string who = owner;
+            std::lock_guard<std::recursive_mutex> lk(g_mx);
+            if (g_killed.load()) return 0;
+            return move_goal_job(who, sid, sys, ch, loc, pt_uu, ff_cms, ff_valid);
+        }
+        catch (...) { return 0; }
+    }
+
     // WHAT: 1 = a move job of ship sid runs, 0 = none (or killed).
     SHIP_CONTROL_API int SC_move_active(int sid)
     {

@@ -6,6 +6,8 @@
 - Follow mode (quick profile, `follow` = 1 and `ff_valid` = 1): the job never finishes by itself. It matches the captain speed in the slot with normal throttle only (feed-forward + P on the slot error + speed-mismatch damping, hard brake on overshoot, brake hysteresis). Fleet cancels / restarts the job.
 - Per-ship max speed estimate (starts from the game limit, learned from steady throttle / speed, kept per ship id).
 - Log every 0.25 s: `ShipControl match ship=.. v_cap=.. v_own=.. thr=.. err=.. vmax_est=..`.
+- New export `SC_move_goal(owner, sid, sys, ch, loc, pt_uu, ff_cms, ff_valid)`: rewrites the goal and the follow feed-forward of the running job in place (no phase / throttle / aim / speed reset; one closing-speed sample is skipped). Returns 0 when there is no job (the caller then uses `SC_move_start`). Replaces cancel + restart, which stopped the turn every time.
+- Logs: `ShipControl turn ship=.. want=.. yaw=.. pit=.. got=.. ph=.. t=..` every 0.5 s; the quick / match lines now also print in phase 1.
 - Not done: heading match in the slot (no aim-at-direction mode exists yet).
 
 ## 0.5.0

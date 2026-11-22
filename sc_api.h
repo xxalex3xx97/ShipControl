@@ -282,6 +282,8 @@ int SC_zero(const char* owner, int sid);
 int SC_move_start(const char* owner, int sid, ScMoveReq* req, wchar_t* err, int errlen);
 /* cancel the move job of ship sid for owner: stops the aim offset, erases the job, no zero, no callback. 1 = cancelled or none, 0 = other owner or killed. */
 int SC_move_cancel(const char* owner, int sid);
+/* level 7: rewrite the goal + follow feed-forward of the running job in place (null pointer = field unchanged). 1 = updated, 0 = no job / other owner. */
+int SC_move_goal(const char* owner, int sid, int sys, const int64_t* ch, const double* loc, const double* pt_uu, int ff_cms, int ff_valid);
 /* 1 = move job of ship sid runs, 0 = none. */
 int SC_move_active(int sid);
 /* status of the move job of ship sid into out (size must be sizeof(ScMoveStatus)). 1 = ok (active 0 when none), 0 = refused. */

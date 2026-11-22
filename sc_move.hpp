@@ -70,6 +70,9 @@ namespace
         // thr_last / steady_t = last step and seconds it stayed within 1 step (learning gate).
         int ff_cms = 0, follow = 0, ff_valid = 0, thr_last = 0;
         double vmax_init = 0.0, vmax_est = 0.0, steady_t = 0.0;
+        // SC_move_goal: goal_jump = the goal was rewritten, so the next step skips one closing-speed sample. turn_log = s since the last turn log line.
+        bool goal_jump = false;
+        double turn_log = 0.0;
     };
 
     // WHAT: a job that ended in this tick: its ship, command seq and result text. Delivered to on_move_done after the registry lock is released.
@@ -135,6 +138,20 @@ namespace
         if (j.thr_warned) return;
         j.thr_warned = true;
         host_logw(h, L"MOVE throttle write failed ship=" + std::to_wstring(j.sid) + L": " + e);
+    }
+
+    // WHAT: quick / match trace line, at most every 0.25 s (both phases). match = follow line. Advances j.q_log by dt: call once per tick.
+    void quick_trace(ScJob& j, double dt, const ScHost& h, int thr, int target, double v_own, double remaining)
+    {
+        j.q_log += dt;
+        if (j.q_log < 0.25) return;
+        j.q_log = 0.0;
+        if (j.follow && j.ff_valid)
+            host_logw(h, L"ShipControl match ship=" + std::to_wstring(j.sid) + L" v_cap=" + std::to_wstring(j.ff_cms / 100.0) + L" v_own=" + std::to_wstring(v_own) +
+                             L" thr=" + std::to_wstring(thr) + L" err=" + std::to_wstring(remaining) + L" vmax_est=" + std::to_wstring(j.vmax_est));
+        else
+            host_logw(h, L"ShipControl quick ship=" + std::to_wstring(j.sid) + L" thr=" + std::to_wstring(thr) + L" target=" + std::to_wstring(target) +
+                             L" v_close=" + std::to_wstring(v_own) + L" remaining=" + std::to_wstring(remaining));
     }
 
     // WHAT: view_zero: send the aim offset (0,0) to console cid. cid <= 0 = nothing was sent. A failure is only traced (legacy view_zero).
@@ -297,7 +314,8 @@ namespace
         // quick: closing speed from the distance change (the speed monitor value is stale/slow), EMA 0.3, never below 0
         if (quick)
         {
-            if (j.prev_dist_m >= 0.0 && dt >= 0.005) j.v_close = 0.7 * j.v_close + 0.3 * (std::max)(0.0, (j.prev_dist_m - aim.dist_m) / dt);
+            if (j.goal_jump) j.goal_jump = false;   // the goal was rewritten: this distance change is not a speed sample
+            else if (j.prev_dist_m >= 0.0 && dt >= 0.005) j.v_close = 0.7 * j.v_close + 0.3 * (std::max)(0.0, (j.prev_dist_m - aim.dist_m) / dt);
             j.prev_dist_m = aim.dist_m;
             const double vm = (f.max_mod_raw > 0 ? f.max_mod_raw : f.max_base_raw) / SM_RAW_PER_M;
             if (vm > 0.0) j.vmax_ms = vm;
@@ -324,12 +342,19 @@ namespace
         }
         // 10. aim offset (view_send) every SM_VIEW_PERIOD_S, both phases
         j.view_t += dt;
+        j.turn_log += dt;
         if (j.view_t >= SM_VIEW_PERIOD_S)
         {
             j.view_t = 0.0;
             double yaw = 0.0, pit = 0.0;
             bool aligned_now = false;
             view_offset(err, aim.a_body, yaw, pit, aligned_now, quick ? (std::min)(20.0 * (j.turn_pct > 0 ? j.turn_pct : 150) / 100.0, 60.0) : SM_VIEW_MAX_DEG);
+            if (j.turn_log >= 0.5)
+            {
+                j.turn_log = 0.0;
+                host_logw(h, L"ShipControl turn ship=" + std::to_wstring(sid) + L" want=" + std::to_wstring(err) + L" yaw=" + std::to_wstring(yaw) + L" pit=" + std::to_wstring(pit) +
+                                 L" got=" + std::to_wstring(j.rate) + L" ph=" + std::to_wstring(j.phase) + L" t=" + std::to_wstring(j.t));
+            }
             std::wstring e;
             if (aligned_now)
             {
@@ -357,7 +382,11 @@ namespace
             j.thr_t = 0.0;
             return;
         }
-        if (j.phase != 2) return;
+        if (j.phase != 2)
+        {
+            if (quick) quick_trace(j, dt, h, j.thr, 0, j.v_close, aim.dist_m - j.radius_m - j.stop_m);
+            return;
+        }
         // 12. low power (power read in this snapshot, or one extra read on the transition tick) and the approach timeout
         bool lp = false;
         int lp_thr = 0;
@@ -406,26 +435,14 @@ namespace
             j.vmax_est = vmax_learn(j.vmax_est, j.vmax_init, thr, v_own, j.steady_t);
             g_vmax_est[sid] = j.vmax_est;
             o = ApproachOut{thr, 0.0, thr, false};
-            j.q_log += dt;
-            if (j.q_log >= 0.25)
-            {
-                j.q_log = 0.0;
-                host_logw(h, L"ShipControl match ship=" + std::to_wstring(sid) + L" v_cap=" + std::to_wstring(v_cap) + L" v_own=" + std::to_wstring(v_own) +
-                                 L" thr=" + std::to_wstring(thr) + L" err=" + std::to_wstring(slot) + L" vmax_est=" + std::to_wstring(j.vmax_est));
-            }
+            quick_trace(j, dt, h, thr, thr, v_own, slot);
         }
         else if (quick)
         {
             v_ms = j.v_close;
             const QuickOut q = approach_step_quick(remaining, v_ms, err, j.steps, lp, lp_thr, j.thr, j.vmax_ms > 0.0 ? j.vmax_ms : 100.0, j.brake_pct, j.overshoot_m);
             o = ApproachOut{q.thr, 0.0, q.target, q.done};
-            j.q_log += dt;
-            if (j.q_log >= 0.25)
-            {
-                j.q_log = 0.0;
-                host_logw(h, L"ShipControl quick ship=" + std::to_wstring(sid) + L" thr=" + std::to_wstring(q.thr) + L" target=" + std::to_wstring(q.target) +
-                                 L" v_close=" + std::to_wstring(v_ms) + L" remaining=" + std::to_wstring(remaining));
-            }
+            quick_trace(j, dt, h, q.thr, q.target, v_ms, remaining);
         }
         else o = approach_step(remaining, v_ms, err, j.steps, lp, lp_thr, j.thr, j.thr_t, dt);
         j.thr = o.thr;
@@ -552,6 +569,29 @@ namespace
         req.out_steps = steps;
         g_jobs_mv[sid] = j;
         return true;
+    }
+
+    // WHAT: rewrites the goal and the follow feed-forward of the running job of ship sid IN PLACE (SC_move_goal). Phase, thr, thr_t, view_t, v_close, prev_dist_m, q_log,
+    //       vmax_est stay: the next step measures the distance to the new goal, and skips one closing-speed sample (goal_jump) so v_close is not corrupted.
+    //       mode 0 uses pt_uu, mode 1 uses sys / ch / loc, mode 2 uses pt_uu as the ore location. A null pointer leaves that field as it is.
+    //       1 = updated, 0 = no job for sid or the job belongs to another owner.
+    int move_goal_job(const std::string& owner, int sid, int sys, const int64_t* ch, const double* loc, const double* pt_uu, int ff_cms, int ff_valid)
+    {
+        auto it = g_jobs_mv.find(sid);
+        if (it == g_jobs_mv.end() || it->second.owner != owner) return 0;
+        ScJob& j = it->second;
+        j.sys = sys;
+        if (ch) std::memcpy(j.ch, ch, sizeof(j.ch));
+        if (loc) std::memcpy(j.loc, loc, sizeof(j.loc));
+        if (pt_uu)
+        {
+            std::memcpy(j.pt_uu, pt_uu, sizeof(j.pt_uu));
+            if (j.mode == 2) std::memcpy(j.ore_loc, pt_uu, sizeof(j.ore_loc));
+        }
+        j.ff_cms = ff_cms;
+        j.ff_valid = ff_valid == 1 ? 1 : 0;
+        j.goal_jump = true;
+        return 1;
     }
 
     // WHAT: cancels the job of ship sid for owner: aim offset stopped (view_zero), job erased. No zero, no callback. 1 = cancelled or none, 0 = other owner.

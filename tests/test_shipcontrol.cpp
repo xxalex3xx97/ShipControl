@@ -317,6 +317,36 @@ static void t_quick_match()
     CHECK(NEARB(est, 200.0, 1e-9));
 }
 
+static void t_move_goal()
+{
+    g_jobs_mv.clear();
+    const int64_t ch[3] = {1, 2, 3};
+    const double loc[3] = {10.0, 20.0, 30.0}, pt[3] = {5.0, 6.0, 7.0};
+    CHECK(move_goal_job("fleet", 7, 4, ch, loc, pt, 500, 1) == 0);          // no job
+    ScJob j;
+    j.sid = 7;
+    j.owner = "fleet";
+    j.phase = 2;
+    j.thr = 6;
+    j.thr_t = 0.3;
+    j.view_t = 0.05;
+    j.v_close = 33.0;
+    j.prev_dist_m = 120.0;
+    j.q_log = 0.1;
+    j.vmax_est = 90.0;
+    j.mode = 1;
+    g_jobs_mv[7] = j;
+    CHECK(move_goal_job("other", 7, 4, ch, loc, pt, 500, 1) == 0);          // other owner
+    CHECK(move_goal_job("fleet", 7, 4, ch, loc, pt, 500, 1) == 1);
+    const ScJob& k = g_jobs_mv[7];
+    CHECK(k.sys == 4 && k.ch[0] == 1 && k.ch[2] == 3 && k.loc[1] == 20.0 && k.pt_uu[2] == 7.0);   // goal rewritten
+    CHECK(k.ff_cms == 500 && k.ff_valid == 1 && k.goal_jump);
+    CHECK(k.phase == 2 && k.thr == 6 && k.thr_t == 0.3 && k.view_t == 0.05);                         // aim / throttle state kept
+    CHECK(k.v_close == 33.0 && k.prev_dist_m == 120.0 && k.q_log == 0.1 && k.vmax_est == 90.0);
+    CHECK(move_goal_job("fleet", 7, 4, nullptr, nullptr, nullptr, -100, 0) == 1 && g_jobs_mv[7].ch[1] == 2 && g_jobs_mv[7].ff_valid == 0);   // null = unchanged
+    g_jobs_mv.clear();
+}
+
 static void t_approach_step()
 {
     ApproachOut o = approach_step(5000.0, 0.0, 0.0, 10, false, 0, 0, 0.0, 0.25);
@@ -790,6 +820,7 @@ int main()
     t_approach_step();
     t_approach_step_quick();
     t_quick_match();
+    t_move_goal();
     t_view_and_ore();
     t_aim_and_rloc();
     t_qcal_and_frame();
