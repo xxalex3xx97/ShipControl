@@ -184,6 +184,49 @@ namespace
         return o;
     }
 
+    // ---- QUICK drive, discrete steps (miner style): decision every SQ_STEP_S, brake early, jump up (no ramp). ----
+    // WHAT: decision period (s); lead time (s): brake when the speed would cover the remaining distance in less than this.
+    constexpr double SQ_STEP_S = 0.1;
+    constexpr double SQ_BRAKE_LEAD_S = 2.0;
+
+    // WHAT: true once acc (s) has reached period; acc then resets to 0. Adds dt first.
+    inline bool step_due(double& acc, double dt, double period)
+    {
+        acc += dt;
+        if (acc < period) return false;
+        acc = 0.0;
+        return true;
+    }
+
+    // WHAT: one discrete QUICK step (no vmax, no brake_pct). rem = remaining - overshoot. rem <= 0: v < SQ_DONE_MS done, else -10 (> 25 m/s), -4 (> 8), -2 (> 3), else 0 (coast, no backing away).
+    //       err > SQ_HEAD_DEG: 0. allowed = rem / SQ_BRAKE_LEAD_S, over = v - allowed: > 25 -> -10, > 8 -> -4, > 3 -> -2; braking before (thr_prev < 0) and over > 0: keep braking
+    //       (-4 if over > 8 else -2). 0 < over <= 3 otherwise: coast (0). Else target = approach_throttle(rem) and thr = target (jump up).
+    inline QuickOut approach_step_fast(double remaining_m, double v_ms, double err_deg, int steps_cap, bool lp, int lp_thr, int thr_prev, int overshoot_m)
+    {
+        const int cap = lowpower_throttle_cap((std::min)(SM_APPROACH_MAX_THR, steps_cap), lp, lp_thr);
+        QuickOut o{0, false, 0};
+        const double rem = remaining_m - overshoot_m;
+        if (rem <= 0.0)
+        {
+            if (v_ms < SQ_DONE_MS) { o.done = true; return o; }
+            o.thr = v_ms > 25.0 ? -10 : (v_ms > 8.0 ? -4 : (v_ms > 3.0 ? -2 : 0));
+            o.target = o.thr;
+            return o;
+        }
+        if (err_deg > SQ_HEAD_DEG) return o;
+        const double over = v_ms - rem / SQ_BRAKE_LEAD_S;
+        if (over > 25.0) o.thr = -10;
+        else if (over > 8.0) o.thr = -4;
+        else if (over > 3.0) o.thr = -2;
+        else if (thr_prev < 0 && over > 0.0) o.thr = over > 8.0 ? -4 : -2;
+        else if (over > 0.0) o.thr = 0;   // a little too fast: coast, never push   // a little too fast: coast, never push (stops the +1 / -2 limit cycle at the stand-off point)
+        else { o.target = approach_throttle(rem, v_ms, cap); o.thr = o.target; }
+        if (o.thr < 0 && v_ms < 5.0) o.thr = 0;   // below 5 m/s step -2 (~-20 m/s) would back the ship away: coast
+        if (o.thr < 0) o.target = o.thr;
+        o.thr = std::clamp(o.thr, -10, (std::max)(cap, 0));
+        return o;
+    }
+
     // ---- QUICK + follow (API 6/7): match the captain's speed in the slot with normal throttle only. ----
     // WHAT: position gain (1/s, ~ 1/SQ_TAU_S), speed-mismatch gain, in-slot band (m).
     constexpr double SQ_KP = 0.5;

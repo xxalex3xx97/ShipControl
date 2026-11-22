@@ -66,6 +66,8 @@ namespace
         // level 6 quick profile: profile 1 = quick. v_close = closing speed EMA (m/s) from the distance change, prev_dist_m = last aim dist (-1 = none), vmax_ms = last known max speed, q_log = s since the last quick log line.
         int profile = 0, brake_pct = 0, turn_pct = 0, overshoot_m = 0;
         double prev_dist_m = -1.0, v_close = 0.0, vmax_ms = 0.0, q_log = 0.0;
+        double dec_t = 1e9;   // quick discrete drive: s since the last speed-step decision (1e9 = decide at once)
+        int fast_tgt = 0;     // quick discrete drive: last target step (for the trace between decisions)
         // level 7 follow: ff_cms = captain speed along the line (cm/s), follow / ff_valid flags, vmax_init / vmax_est = max speed at step 10 (m/s, learned),
         // thr_last / steady_t = last step and seconds it stayed within 1 step (learning gate).
         int ff_cms = 0, follow = 0, ff_valid = 0, thr_last = 0;
@@ -459,7 +461,14 @@ namespace
         else if (quick)
         {
             v_ms = j.v_close;
-            const QuickOut q = approach_step_quick(remaining, v_ms, err, j.steps, lp, lp_thr, j.thr, j.vmax_ms > 0.0 ? j.vmax_ms : 100.0, j.brake_pct, j.overshoot_m);
+            QuickOut q{j.thr, false, j.fast_tgt};
+            if (j.dec_t >= SQ_STEP_S)
+            {
+                j.dec_t = 0.0;
+                q = approach_step_fast(remaining, v_ms, err, j.steps, lp, lp_thr, j.thr, j.overshoot_m);
+                j.fast_tgt = q.target;
+            }
+            else j.dec_t += dt;
             o = ApproachOut{q.thr, 0.0, q.target, q.done};
             quick_trace(j, dt, h, q.thr, q.target, v_ms, remaining);
         }
