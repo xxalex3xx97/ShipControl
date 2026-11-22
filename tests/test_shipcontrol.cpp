@@ -259,54 +259,62 @@ static void t_approach_step_fast()
     // args: remaining, v, err, cap, lp, lp_thr, thr_prev, overshoot
     QuickOut q = approach_step_fast(5000.0, 0.0, 0.0, 10, false, 0, 0, 0);
     CHECK(q.thr == 10 && q.target == 10 && !q.done);                       // far: full at once
-    q = approach_step_fast(50.0, 3.0, 0.0, 10, false, 0, 0, 0);
-    CHECK(q.thr == 1);                                                     // near: low speed
-    q = approach_step_fast(100.0, 90.0, 0.0, 10, false, 0, 10, 0);
-    CHECK(q.thr == -10);                                                   // early brake
-    q = approach_step_fast(100.0, 51.0, 0.0, 10, false, 0, -4, 0);
-    CHECK(q.thr == -2);                                                    // brake hold
-    q = approach_step_fast(-5.0, 30.0, 0.0, 10, false, 0, 5, 0);
-    CHECK(q.thr == -10 && !q.done);
-    q = approach_step_fast(-5.0, 0.5, 0.0, 10, false, 0, -2, 0);
-    CHECK(q.done && q.thr == 0);
+    q = approach_step_fast(SQ_FULL_M, 0.0, 0.0, 10, false, 0, 0, 0);
+    CHECK(q.thr == 10);
+    q = approach_step_fast(150.0, 0.0, 0.0, 10, false, 0, 0, 0);
+    CHECK(q.thr == 5);                                                     // proportional
+    q = approach_step_fast(SQ_STOP_M + 0.5, 99.0, 0.0, 10, false, 0, 0, 0);
+    CHECK(q.thr == 1 && !q.done);                                          // just outside the stop distance: creep step 1
+    q = approach_step_fast(SQ_STOP_M, 99.0, 0.0, 10, false, 0, 7, 0);
+    CHECK(q.thr == 0 && q.done);
+    q = approach_step_fast(-50.0, 99.0, 0.0, 10, false, 0, 7, 0);
+    CHECK(q.thr == 0 && q.done);                                           // past the goal: stop, never reverse
     q = approach_step_fast(5000.0, 0.0, 40.0, 10, false, 0, 5, 0);
-    CHECK(q.thr == 0 && q.target == 0);
+    CHECK(q.thr == 0 && q.target == 0 && !q.done);                         // err > head: turn first
     q = approach_step_fast(5000.0, 0.0, 0.0, 10, true, 3, 0, 0);
-    CHECK(q.thr == 3);
+    CHECK(q.thr == 3);                                                     // low-power cap
+    q = approach_step_fast(5000.0, 0.0, 0.0, 4, false, 0, 0, 0);
+    CHECK(q.thr == 4);                                                     // steps cap
+    int prev = 0;
+    for (double rem = 0.0; rem <= 1000.0; rem += 0.5)                     // monotone in remaining, never negative, never above cap
+    {
+        q = approach_step_fast(rem, 0.0, 0.0, 7, false, 0, 0, 0);
+        CHECK(q.thr >= prev && q.thr >= 0 && q.thr <= 7);
+        prev = q.thr;
+    }
     double acc = 0.0;
     bool a = step_due(acc, 0.04, SQ_STEP_S), b = step_due(acc, 0.04, SQ_STEP_S), c = step_due(acc, 0.04, SQ_STEP_S);
     CHECK(!a && !b && c && acc == 0.0);
-    // closed loop: vmax 100 m/s, 10 steps, 5 km, decision every 0.1 s, speed sample 0.25 s old
-    for (int os : {0, 10})
+    // instant-stop dynamics: speed = thr * vmax / 10 at once, decision every 0.1 s, 5 km away, goal still / moving at 40 m/s
+    for (double vg : {0.0, 40.0})
     {
-        double pos = 0.0, v = 0.0, vmax = 100.0;
-        int thr = 0, flips = 0, last_sign = 0, maxthr = 0;
+        double pos = 0.0, goal = 5000.0, vmax = 100.0, dec = 1e9;
+        int thr = 0, flips = 0, last_sign = 0, maxthr = 0, minthr = 0, steady = 0;
         bool done = false;
-        double dec = 1e9;
-        double hist[3] = {0, 0, 0};   // v 0.1 s steps back (sample lag ~0.25 s)
-        for (int i = 0; i < 20000 && !done; ++i)
+        for (int i = 0; i < 40000 && !done; ++i)                          // 0.01 s per tick, 400 s
         {
             if (dec >= SQ_STEP_S)
             {
                 dec = 0.0;
-                q = approach_step_fast(5000.0 - pos, (std::max)(0.0, hist[2]), 0.0, 10, false, 0, thr, os);
+                q = approach_step_fast(goal - pos, 0.0, 0.0, 10, false, 0, thr, 0);
+                if (i > 30000 && q.thr != thr) ++steady;                  // thr changes in the last 100 s
                 thr = q.thr;
                 done = q.done;
                 if (done) break;
             }
             else dec += 0.01;
-            v += (thr * vmax / 10.0 - v) * (0.01 / 0.8);
-            pos += v * 0.01;
-            if (i % 10 == 0) { hist[2] = hist[1]; hist[1] = hist[0]; hist[0] = v; }
+            pos += thr * vmax / 10.0 * 0.01;
+            goal += vg * 0.01;
             maxthr = (std::max)(maxthr, thr);
+            minthr = (std::min)(minthr, thr);
             const int s = thr > 0 ? 1 : thr < 0 ? -1 : 0;
             if (s != 0) { if (last_sign != 0 && s != last_sign) ++flips; last_sign = s; }
         }
-        CHECK(done);
-        CHECK(pos <= 5000.0 + os + 1.0);
-        CHECK(maxthr <= 10);
-        CHECK(flips <= 3);
-        std::printf("fast sim os=%d pos=%f flips=%d\n", os, pos, flips);
+        const double err = goal - pos;
+        if (vg == 0.0) CHECK(done && err <= SQ_STOP_M + 1e-9 && err >= -1.0);
+        else CHECK(!done && err > SQ_STOP_M && err < SQ_FULL_M && steady == 0);   // settles where thr matches the goal speed (40 m/s = step 4: ~120 m)
+        CHECK(maxthr <= 10 && minthr >= 0 && flips == 0);
+        std::printf("fast sim vg=%.0f err=%.1f thr=%d steady_changes=%d\n", vg, err, thr, steady);
     }
 }
 
