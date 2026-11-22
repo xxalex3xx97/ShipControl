@@ -347,6 +347,68 @@ static void t_move_goal()
     g_jobs_mv.clear();
 }
 
+static void t_follow_smooth()
+{
+    // 1D follow sim: control tick 0.25 s, physics 0.05 s, speed follows thr*vmax/10 with a 0.8 s lag. Captain 40 m/s (0-30 s), stopped (30-60 s), 20 m/s (60-90 s). Starts 100 m behind.
+    MatchState st;
+    double cap_pos = 100.0, pos = 0.0, v = 0.0, vmax = 100.0, maxabs = 0.0, worst_dthr = 0.0, err_end = 0.0;
+    int thr = 0, flips = 0, last_sign = 0, near_ticks = 0, mixed = 0, lo_ok = 0;
+    double mint = 0.0;
+    for (int i = 0; i < 360; ++i)
+    {
+        const double t = i * 0.25;
+        const double vc = t < 30.0 ? 40.0 : (t < 60.0 ? 0.0 : 20.0);
+        const double err = cap_pos - pos;
+        const int prev = thr;
+        thr = quick_match_step(st, 0.25, err, vc, v, vmax, 10, thr, 100, 10);   // v signed: reversing reads negative
+        CHECK(thr >= -10 && thr <= 10);
+        const bool settled = (t >= 15.0 && t < 30.0) || (t >= 45.0 && t < 60.0) || (t >= 75.0 && t < 90.0);   // away from the captain's speed changes
+        if (std::fabs(err) < SQ_NEAR_M && settled)
+        {
+            ++near_ticks;
+            worst_dthr = (std::max)(worst_dthr, static_cast<double>(std::abs(thr - prev)));
+            const int sg = thr > 0 ? 1 : (thr < 0 ? -1 : 0);
+            if (sg != 0) { if (last_sign != 0 && sg != last_sign) ++flips; last_sign = sg; }
+            if (thr > 0 && thr < 10) ++mixed;
+            if (thr == 0) ++lo_ok;
+        }
+        mint = (std::min)(mint, static_cast<double>(thr));
+        if (t < 30.0 || t >= 60.0) maxabs = (std::min)(maxabs, err);   // the captain's hard stop overshoots by the ship's own stopping distance (physics), not judged
+        for (int k = 0; k < 5; ++k)
+        {
+            v += (thr * vmax / 10.0 - v) * (0.05 / 0.8);
+            pos += v * 0.05;
+            cap_pos += vc * 0.05;
+        }
+        if (i == 119 || i == 239 || i == 359) { err_end = cap_pos - pos; CHECK(std::fabs(err_end) < 10.0); }   // converged in each captain phase
+        #ifdef SC_SIM_DEBUG
+        if (i % 8 == 0) std::printf("t=%.1f err=%.1f v=%.1f thr=%d\n", t, cap_pos - pos, v, thr);
+        #endif
+    }
+    CHECK(near_ticks > 100);
+    CHECK(flips < 2);                                                     // no sign chatter in the near zone
+    CHECK(worst_dthr <= 1.0);                                             // at most one step per 0.25 s near the slot
+    CHECK(maxabs > -2.0 * 10.0);                                          // never rams
+    CHECK(mixed > 20 && lo_ok > 10);                                      // intermediate steps are used, not only 0 / 10
+    // steering
+    const double up[3] = {0.0, 0.0, 1.0};
+    double yaw = 9.0, pit = 9.0;
+    bool al = false;
+    for (double e : {0.0, 1.5, 2.4})
+    {
+        view_offset_follow(e, up, 0.0, 0.0, 0.1, 30.0, yaw, pit, al);
+        CHECK(yaw == 0.0 && pit == 0.0 && al);                            // deadband: exactly zero
+    }
+    view_offset_follow(10.0, up, 4.0, 0.0, 0.1, 30.0, yaw, pit, al);
+    CHECK(!al && NEARB(yaw, 5.0, 1e-9) && NEARB(pit, 0.0, 1e-9));        // 0.5 deg per deg
+    view_offset_follow(20.0, up, 0.0, 0.0, 0.1, 30.0, yaw, pit, al);
+    CHECK(NEARB(yaw, 6.0, 1e-9));                                         // slew: 60 deg/s * 0.1 s
+    view_offset_follow(20.0, up, 6.0, 0.0, 0.1, 30.0, yaw, pit, al);
+    CHECK(NEARB(yaw, 10.0, 1e-9));                                        // proportional target 10 deg reached
+    view_offset_follow(45.0, up, 0.0, 0.0, 0.1, 30.0, yaw, pit, al);
+    CHECK(NEARB(yaw, 30.0, 1e-9));                                        // big error: hard turn, no slew
+}
+
 static void t_approach_step()
 {
     ApproachOut o = approach_step(5000.0, 0.0, 0.0, 10, false, 0, 0, 0.0, 0.25);
@@ -821,6 +883,7 @@ int main()
     t_approach_step_quick();
     t_quick_match();
     t_move_goal();
+    t_follow_smooth();
     t_view_and_ore();
     t_aim_and_rloc();
     t_qcal_and_frame();

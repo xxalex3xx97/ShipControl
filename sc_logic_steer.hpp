@@ -220,6 +220,64 @@ namespace
         return MatchOut{std::clamp(thr, -10, cap), false};
     }
 
+    // ---- follow, smooth near the slot (API 7) ----
+    // WHAT: zones by |slot err| (m): above SQ_FAR_M the plain quick_match_throttle (full throttle / hard brake allowed); below it an EMA-smoothed proportional throttle;
+    //       below SQ_NEAR_M also a throttle rate limit and the sign hysteresis; below SQ_DEAD_M pure feed-forward.
+    constexpr double SQ_FAR_M = 80.0;
+    constexpr double SQ_NEAR_M = 40.0;
+    constexpr double SQ_DEAD_M = 3.0;
+    constexpr double SQ_EMA = 0.3;          // v_cmd smoothing
+    constexpr double SQ_RATE_S = 0.25;      // near zone: one step of thr per this many s
+    constexpr double SQ_RATE_DEAD_S = 0.5;  // dead zone: one step per this many s
+    constexpr double SQ_SIGN_S = 0.5;       // a thr sign change must persist this long (near zone)
+    // WHAT: state of quick_match_step (one per job).
+    struct MatchState { double ema = 0.0; bool have = false; double since_chg = 0.0; double opp_t = 0.0; };
+
+    // WHAT: smooth follow throttle. Args as quick_match_throttle plus st / dt (s since the last call) and no kp/kd/band (SQ_KP, SQ_KD constants).
+    //       |err| > SQ_FAR_M: quick_match_throttle. Else v_cmd = clamp(v_cap + kp*err - kd*(v_own - v_cap)) smoothed by EMA SQ_EMA, thr = round(10 v_cmd/vmax);
+    //       |err| < SQ_DEAD_M: thr = feed-forward round(10 v_cap/vmax). thr < 0 only for err < -2 SQ_DEAD_M: limited to -10/-4/-2 by speed when v_own > v_cap + band, else at most -2 (back to the slot),
+    //       or (err >= SQ_NEAR_M) v_own > v_des + band: hard brake. Near zone and |v_own - v_cap| < band: thr moves 1 step per SQ_RATE_S (SQ_RATE_DEAD_S in the dead zone),
+    //       and a sign change (pos <-> neg) waits SQ_SIGN_S. A large speed mismatch changes thr freely (a fast approach must brake at once).
+    inline int quick_match_step(MatchState& st, double dt, double err, double v_cap, double v_own, double vmax_est, int steps_cap, int thr_prev, int brake_pct, int overshoot_m)
+    {
+        const double ae = std::fabs(err);
+        if (ae > SQ_FAR_M)
+        {
+            st.have = false; st.since_chg = SQ_RATE_S; st.opp_t = 0.0;
+            return quick_match_throttle(err, v_cap, v_own, vmax_est, steps_cap, thr_prev, SQ_KP, SQ_KD, SQ_BAND_M, brake_pct, overshoot_m).thr;
+        }
+        const int cap = std::clamp(steps_cap, 0, SM_APPROACH_MAX_THR);
+        const double vmax = (std::max)(vmax_est, 1.0);
+        const double kpe = SQ_KP * (brake_pct > 0 ? brake_pct : 100) / 100.0;
+        const double rel = v_own - v_cap;
+        const double v_des = std::clamp(v_cap + kpe * err, -0.3 * vmax, vmax);
+        const double raw = std::clamp(v_des - SQ_KD * rel, -0.3 * vmax, vmax);
+        st.ema = st.have ? SQ_EMA * raw + (1.0 - SQ_EMA) * st.ema : raw;
+        st.have = true;
+        const double vband = (std::max)(10.0, 0.1 * vmax);
+        const int hard = v_own > 0.25 * vmax ? -10 : (v_own > 0.05 * vmax ? -4 : -2);
+        const bool nearz = ae < SQ_NEAR_M, dead = ae < SQ_DEAD_M;
+        int want = dead ? std::clamp(static_cast<int>(std::lround(10.0 * v_cap / vmax)), 0, cap) : static_cast<int>(std::lround(10.0 * st.ema / vmax));
+        if (!nearz && err >= 0.0 && v_own > v_des + vband) want = hard;        // approaching far too fast: brake now
+        else if (want < 0) want = err < -2.0 * SQ_DEAD_M ? (std::max)(want, v_own > v_cap + vband ? hard : -2) : 0;   // reverse: hard only to kill speed, else a gentle -2 back to the slot
+        want = std::clamp(want, -10, cap);
+        if (!nearz) { st.since_chg = SQ_RATE_S; st.opp_t = 0.0; return want; }
+        if (static_cast<long long>(thr_prev) * want < 0)
+        {
+            st.opp_t += dt;
+            if (st.opp_t < SQ_SIGN_S) want = 0;
+            else st.opp_t = 0.0;
+        }
+        else st.opp_t = 0.0;
+        if (std::fabs(rel) >= vband) { st.since_chg = SQ_RATE_S; return want; }
+        const double period = dead ? SQ_RATE_DEAD_S : SQ_RATE_S;
+        st.since_chg += dt;
+        if (want == thr_prev) return want;
+        if (st.since_chg < period) return thr_prev;
+        st.since_chg = 0.0;
+        return thr_prev + (want > thr_prev ? 1 : -1);
+    }
+
     // WHAT: learns the max speed at step 10 (m/s). Steady throttle (>= 1.5 s within 1 step), thr >= 2, v_own >= 1: ratio = v_own / (thr/10),
     //       EMA 0.2 into est, clamped to 0.5x..2x of init. Otherwise est unchanged.
     inline double vmax_learn(double est, double init, int thr, double v_own_ms, double steady_s)
@@ -247,6 +305,26 @@ namespace
         yaw_deg = mag * a[2] / n;
         pit_deg = mag * (-a[1]) / n;
         return true;
+    }
+
+    // WHAT: follow steering offset (deg). err <= SQ_HEAD_DEG: |err| < SQ_VIEW_DEAD_DEG -> 0 (aligned); else mag = min(SQ_VIEW_GAIN * err, max_deg); a change of a
+    //       non-zero component is limited to SQ_VIEW_SLEW deg/s (dt = s since the last send; prev_* = last sent). err > SQ_HEAD_DEG: the hard view_offset, no slew.
+    constexpr double SQ_VIEW_DEAD_DEG = 2.5;
+    constexpr double SQ_VIEW_GAIN = 0.5;
+    constexpr double SQ_VIEW_SLEW = 60.0;
+    inline void view_offset_follow(double err, const double a[3], double prev_yaw, double prev_pit, double dt, double max_deg, double& yaw, double& pit, bool& aligned)
+    {
+        if (err > SQ_HEAD_DEG) { view_offset(err, a, yaw, pit, aligned, max_deg); return; }
+        aligned = err < SQ_VIEW_DEAD_DEG;
+        yaw = 0.0;
+        pit = 0.0;
+        if (aligned) return;
+        const double n = std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+        if (n <= 1e-9) return;
+        const double mag = (std::min)(SQ_VIEW_GAIN * err, max_deg);
+        const double lim = SQ_VIEW_SLEW * dt;
+        yaw = std::clamp(mag * a[2] / n, prev_yaw - lim, prev_yaw + lim);
+        pit = std::clamp(mag * (-a[1]) / n, prev_pit - lim, prev_pit + lim);
     }
 
     // WHAT: surface distance (m) to a target: |tgt - ship| - rad_m. Points in m. rad_m = 0 for points and ore.

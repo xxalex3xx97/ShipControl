@@ -72,6 +72,11 @@ namespace
         double vmax_init = 0.0, vmax_est = 0.0, steady_t = 0.0;
         // SC_move_goal: goal_jump = the goal was rewritten, so the next step skips one closing-speed sample. turn_log = s since the last turn log line.
         bool goal_jump = false;
+        // smooth follow: match = throttle controller state, yaw_o / pit_o = last aim offset sent (deg), flips = times (j.t) of thr sign changes in the last 4 s, last_sign = last non-zero thr sign.
+        MatchState match;
+        double yaw_o = 0.0, pit_o = 0.0;
+        std::vector<double> flips;
+        int last_sign = 0;
         double turn_log = 0.0;
     };
 
@@ -147,10 +152,10 @@ namespace
         if (j.q_log < 0.25) return;
         j.q_log = 0.0;
         if (j.follow && j.ff_valid)
-            host_logw(h, L"ShipControl match ship=" + std::to_wstring(j.sid) + L" v_cap=" + std::to_wstring(j.ff_cms / 100.0) + L" v_own=" + std::to_wstring(v_own) +
-                             L" thr=" + std::to_wstring(thr) + L" err=" + std::to_wstring(remaining) + L" vmax_est=" + std::to_wstring(j.vmax_est));
+            host_logw(h, L"PROBE ShipControl match ship=" + std::to_wstring(j.sid) + L" v_cap=" + std::to_wstring(j.ff_cms / 100.0) + L" v_own=" + std::to_wstring(v_own) +
+                             L" thr=" + std::to_wstring(thr) + L" err=" + std::to_wstring(remaining) + L" vmax_est=" + std::to_wstring(j.vmax_est) + L" sign_flips_per_s=" + std::to_wstring(j.flips.size() / 4.0));
         else
-            host_logw(h, L"ShipControl quick ship=" + std::to_wstring(j.sid) + L" thr=" + std::to_wstring(thr) + L" target=" + std::to_wstring(target) +
+            host_logw(h, L"PROBE ShipControl quick ship=" + std::to_wstring(j.sid) + L" thr=" + std::to_wstring(thr) + L" target=" + std::to_wstring(target) +
                              L" v_close=" + std::to_wstring(v_own) + L" remaining=" + std::to_wstring(remaining));
     }
 
@@ -345,14 +350,19 @@ namespace
         j.turn_log += dt;
         if (j.view_t >= SM_VIEW_PERIOD_S)
         {
+            const double vdt = j.view_t;
             j.view_t = 0.0;
             double yaw = 0.0, pit = 0.0;
             bool aligned_now = false;
-            view_offset(err, aim.a_body, yaw, pit, aligned_now, quick ? (std::min)(20.0 * (j.turn_pct > 0 ? j.turn_pct : 150) / 100.0, 60.0) : SM_VIEW_MAX_DEG);
+            const double vcap = quick ? (std::min)(20.0 * (j.turn_pct > 0 ? j.turn_pct : 150) / 100.0, 60.0) : SM_VIEW_MAX_DEG;
+            if (quick && j.follow && j.ff_valid) view_offset_follow(err, aim.a_body, j.yaw_o, j.pit_o, vdt, vcap, yaw, pit, aligned_now);
+            else view_offset(err, aim.a_body, yaw, pit, aligned_now, vcap);
+            j.yaw_o = yaw;
+            j.pit_o = pit;
             if (j.turn_log >= 0.5)
             {
                 j.turn_log = 0.0;
-                host_logw(h, L"ShipControl turn ship=" + std::to_wstring(sid) + L" want=" + std::to_wstring(err) + L" yaw=" + std::to_wstring(yaw) + L" pit=" + std::to_wstring(pit) +
+                host_logw(h, L"PROBE ShipControl turn ship=" + std::to_wstring(sid) + L" want=" + std::to_wstring(err) + L" yaw=" + std::to_wstring(yaw) + L" pit=" + std::to_wstring(pit) +
                                  L" got=" + std::to_wstring(j.rate) + L" ph=" + std::to_wstring(j.phase) + L" t=" + std::to_wstring(j.t));
             }
             std::wstring e;
@@ -429,7 +439,16 @@ namespace
             const int cap = lowpower_throttle_cap((std::min)(SM_APPROACH_MAX_THR, j.steps), lp, lp_thr);
             int thr = 0;
             if (err > SQ_HEAD_DEG && err <= 90.0) thr = 0;   // turn first, hold the throttle
-            else thr = quick_match_throttle(slot, v_cap, v_own, j.vmax_est, cap, j.thr, SQ_KP, SQ_KD, SQ_BAND_M, j.brake_pct, j.overshoot_m).thr;
+            else thr = quick_match_step(j.match, dt, slot, v_cap, v_own, j.vmax_est, cap, j.thr, j.brake_pct, j.overshoot_m);
+            {   // sign flips (pos <-> neg, zeros skipped) in the last 4 s, for the match log
+                const int sg = thr > 0 ? 1 : (thr < 0 ? -1 : 0);
+                if (sg != 0)
+                {
+                    if (j.last_sign != 0 && sg != j.last_sign) j.flips.push_back(j.t);
+                    j.last_sign = sg;
+                }
+                while (!j.flips.empty() && j.flips.front() < j.t - 4.0) j.flips.erase(j.flips.begin());
+            }
             j.steady_t = std::abs(thr - j.thr_last) <= 1 ? j.steady_t + dt : 0.0;
             j.thr_last = thr;
             j.vmax_est = vmax_learn(j.vmax_est, j.vmax_init, thr, v_own, j.steady_t);

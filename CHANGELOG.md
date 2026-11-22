@@ -8,6 +8,8 @@
 - Log every 0.25 s: `ShipControl match ship=.. v_cap=.. v_own=.. thr=.. err=.. vmax_est=..`.
 - New export `SC_move_goal(owner, sid, sys, ch, loc, pt_uu, ff_cms, ff_valid)`: rewrites the goal and the follow feed-forward of the running job in place (no phase / throttle / aim / speed reset; one closing-speed sample is skipped). Returns 0 when there is no job (the caller then uses `SC_move_start`). Replaces cancel + restart, which stopped the turn every time.
 - Logs: `ShipControl turn ship=.. want=.. yaw=.. pit=.. got=.. ph=.. t=..` every 0.5 s; the quick / match lines now also print in phase 1.
+- Smooth follow near the slot (`quick_match_step`): above 80 m the plain quick controller; below it an EMA-smoothed proportional throttle (any step -10..10); below 40 m the throttle moves 1 step per 0.25 s (0.5 s in the 3 m dead zone, pure feed-forward there) and a thr sign change waits 0.5 s; reverse only past the slot (hard only to kill speed, else at most -2). Follow steering (`view_offset_follow`): 2.5 deg dead zone, 0.5 deg offset per deg of error, 60 deg/s slew limit; errors above 30 deg keep the hard turn.
+- All ShipControl trace lines (`match`, `quick`, `turn`) start with `PROBE ` so the Fleet log filter keeps them. The match line also prints `sign_flips_per_s` (thr sign changes in the last 4 s / 4).
 - Not done: heading match in the slot (no aim-at-direction mode exists yet).
 
 ## 0.5.0
