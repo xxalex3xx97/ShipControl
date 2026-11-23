@@ -14,6 +14,7 @@ namespace
 {
     // WHAT: heading error below this (deg): phase 1 face done. Mining MV_FACE_DONE_DEG.
     constexpr double SM_FACE_DONE_DEG = 2.0;
+    constexpr double SM_TRACK_DEG = 0.3;   // fight track job (profile 2): dead zone deg, never finishes
     // WHAT: face fails after this many s in phase 1. Mining MV_FACE_TIMEOUT_S.
     constexpr double SM_FACE_TIMEOUT_S = 30.0;
     // WHAT: approach enters phase 2 below this heading error (deg). Mining MV_APPROACH_START_DEG.
@@ -378,12 +379,12 @@ namespace
         if (m > SC_VIEW_AXIS_MAX_DEG) { const double k = SC_VIEW_AXIS_MAX_DEG / m; yaw *= k; pit *= k; }
     }
 
-    // WHAT: quick profile aim offset. err < SM_FACE_DONE_DEG: 0, aligned. Else mag = err > SQ_TURN_FULL_DEG ? max_deg : max(err * K, MIN) (<= err * TAPER when
+    // WHAT: quick profile aim offset. err < done_deg (default SM_FACE_DONE_DEG): 0, aligned. Else mag = err > SQ_TURN_FULL_DEG ? max_deg : max(err * K, MIN) (<= err * TAPER when
     //       err < SQ_TURN_TAPER_DEG), <= max_deg; direction = rotation axis a (body); an undefined axis (|a| ~ 0) with err > SQ_TURN_NOZERO_ERR_DEG sends yaw = mag
     //       (never a zero offset); the vector is then scaled to SC_VIEW_AXIS_MAX_DEG per axis.
-    inline void view_offset_quick(double err, const double a[3], double max_deg, double& yaw, double& pit, bool& aligned)
+    inline void view_offset_quick(double err, const double a[3], double max_deg, double& yaw, double& pit, bool& aligned, double done_deg = SM_FACE_DONE_DEG)
     {
-        aligned = err < SM_FACE_DONE_DEG;
+        aligned = err < done_deg;
         yaw = 0.0;
         pit = 0.0;
         if (aligned) return;

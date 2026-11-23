@@ -56,7 +56,7 @@ namespace
         double qs[4] = {1, 0, 0, 0};
         double rate = 0.0;
         double err = -1.0;
-        bool aligned = false, ore_fresh = false;
+        bool aligned = false, ore_fresh = false, track = false;   // track: fight nose job (profile 2)
         int thr = 0;
         bool warp_wait = false;
         double warp_t = 0.0;
@@ -339,6 +339,7 @@ namespace
         {
             Phase1 p1 = phase1_decide(approach, err, j.pt);
             if (quick && approach && p1 == P1_NONE && err < SQ_HEAD_DEG) p1 = P1_TO_PHASE2;   // quick: start the approach at a wide error
+            if (j.track && (p1 == P1_FACE_OK || p1 == P1_FACE_TIMEOUT)) p1 = P1_NONE;   // track: goal rewritten every tick, never ends here
             if (p1 == P1_FACE_OK) { finish_job(sid, L"ok heading_error=" + std::to_wstring(err) + L"deg", h, done, true); return; }
             if (p1 == P1_FACE_TIMEOUT) { finish_job(sid, L"error: face timeout err=" + std::to_wstring(err), h, done, true); return; }
             if (p1 == P1_TO_PHASE2)
@@ -359,7 +360,7 @@ namespace
             bool aligned_now = false;
             const double vcap = quick ? (std::min)(20.0 * (j.turn_pct > 0 ? j.turn_pct : 150) / 100.0, 60.0) : SM_VIEW_MAX_DEG;
             if (quick && j.follow && j.ff_valid) view_offset_follow(err, aim.a_body, j.yaw_o, j.pit_o, vdt, vcap, yaw, pit, aligned_now);
-            else if (quick) view_offset_quick(err, aim.a_body, vcap, yaw, pit, aligned_now);
+            else if (quick) view_offset_quick(err, aim.a_body, vcap, yaw, pit, aligned_now, j.track ? SM_TRACK_DEG : SM_FACE_DONE_DEG);
             else view_offset(err, aim.a_body, yaw, pit, aligned_now, vcap);
             bool sent_clamped = false;
             if (quick && (std::max)(std::fabs(yaw), std::fabs(pit)) > SC_VIEW_AXIS_MAX_DEG) { view_clamp_axes(yaw, pit); sent_clamped = true; }
@@ -588,7 +589,8 @@ namespace
         j.handle = req.handle;
         j.radius_m = req.radius_m;
         j.stop_m = req.stop_m;
-        j.profile = req.profile == 1 ? 1 : 0;
+        j.profile = req.profile >= 1 ? 1 : 0;
+        j.track = req.profile == 2 && j.kind == 0;
         j.brake_pct = req.brake_pct;
         j.turn_pct = req.turn_pct;
         j.overshoot_m = req.overshoot_m;

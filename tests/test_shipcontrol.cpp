@@ -484,6 +484,9 @@ static void t_follow_smooth()
     CHECK(NEARB(yaw, 10.0, 1e-9));                                        // min 10 (taper 15)
     view_offset_quick(1.99, up, 60.0, yaw, pit, al);
     CHECK(al);
+    view_offset_quick(1.0, up, 60.0, yaw, pit, al, SM_TRACK_DEG); CHECK(!al && NEARB(yaw, 6.0, 1e-9));
+    view_offset_quick(0.2, up, 60.0, yaw, pit, al, SM_TRACK_DEG); CHECK(al && yaw == 0.0 && pit == 0.0);
+    view_offset_quick(1.0, up, 60.0, yaw, pit, al); CHECK(al);
     const double dg[3] = {0, 0, 0};
     view_offset_quick(47.0, dg, 60.0, yaw, pit, al);
     CHECK(!al && (yaw != 0.0 || pit != 0.0));                             // never an all-zero offset at a big error

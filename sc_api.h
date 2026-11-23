@@ -133,7 +133,7 @@ struct ScMoveReq
     int32_t out_cid;     /* off 120 OUT */
     int32_t out_steps;   /* off 124 OUT */
     /* level 6: drive profile. A client that sends size 128 (level 5) gets the careful profile. */
-    int32_t profile;     /* off 128: 0 careful (default), 1 quick */
+    int32_t profile;     /* off 128: 0 careful (default), 1 quick, 2 quick + track (face job never finishes, 0.3 deg dead zone; older ShipControl = careful) */
     int32_t brake_pct;   /* off 132: quick: braking strength %, 0 = 100 */
     int32_t turn_pct;    /* off 136: quick: aim offset cap % of 20 deg, 0 = 150 */
     int32_t overshoot_m; /* off 140: quick: metres past the goal tolerated */
