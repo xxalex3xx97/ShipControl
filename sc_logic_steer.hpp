@@ -39,6 +39,16 @@ namespace
     constexpr double SM_VIEW_DEADZONE_DEG = 7.0;
     // WHAT: resend period of the aim offset (s). Mining MV_VIEW_PERIOD_S.
     constexpr double SM_VIEW_PERIOD_S = 0.1;
+    // WHAT: extrapolation cap of the goal velocity (s). A stalled Fleet must not run the goal away.
+    constexpr double SC_GV_MAX_AGE_S = 0.6;
+    // WHAT: goal loc (raw) + v_ms * clamp(age, 0, SC_GV_MAX_AGE_S) * raw_per_m. Pure. Non-finite v or age = that term is 0.
+    inline void sc_goal_extrap(const double loc[3], const double v_ms[3], double age_s, double raw_per_m, double out[3])
+    {
+        double a = std::isfinite(age_s) ? age_s : 0.0;
+        if (a < 0.0) a = 0.0;
+        if (a > SC_GV_MAX_AGE_S) a = SC_GV_MAX_AGE_S;
+        for (int i = 0; i < 3; ++i) out[i] = loc[i] + (std::isfinite(v_ms[i]) ? v_ms[i] : 0.0) * a * raw_per_m;
+    }
     // WHAT: raw ViewRotation units per degree. Mining VIEW_RAW_PER_DEG (mb_steer.hpp).
     constexpr double SM_VIEW_RAW_PER_DEG = 65536.0;
     // WHAT: ore actor is re-read within this distance (m). Mining ORE_REFRESH_M (aim_calc_ore).

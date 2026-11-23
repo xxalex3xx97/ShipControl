@@ -5,6 +5,7 @@
  * SC2b (API level 3) appends: move jobs (SC_move_start, SC_move_cancel, SC_move_active, SC_move_status, SC_tick_frame) and ScHost 80 bytes.
  * SC3 (API level 4) appends: bubble ladder (SC_tick_bubble, SC_bubble_status), ScHost 112 bytes (4 callbacks), structs ScBlockHit, ScBubbleProfile, ScBubbleEvent, ScBubbleStatus.
  * SC4 (API level 5) appends: owner-scoped SC_set_host_for, SC_set_tune_for, SC_tick_speed_for, SC_tick_frame_for, SC_tick_bubble_for. The legacy exports act for owner "mining".
+ * Level 8 appends SC_move_goal_v: same as SC_move_goal plus vel_ms[3] (world m/s), goal extrapolated every tick, cap 0.6 s.
  * GAME FACTS: none. */
 #ifndef SC_API_H
 #define SC_API_H
@@ -19,7 +20,7 @@
 extern "C" {
 #endif
 
-#define SC_API_LEVEL 7
+#define SC_API_LEVEL 8
 
 /* wchar_t must be 16-bit (Windows) to match the DLL */
 #ifdef __cplusplus
@@ -284,6 +285,8 @@ int SC_move_start(const char* owner, int sid, ScMoveReq* req, wchar_t* err, int 
 int SC_move_cancel(const char* owner, int sid);
 /* level 7: rewrite the goal + follow feed-forward of the running job in place (null pointer = field unchanged). 1 = updated, 0 = no job / other owner. */
 int SC_move_goal(const char* owner, int sid, int sys, const int64_t* ch, const double* loc, const double* pt_uu, int ff_cms, int ff_valid);
+/* level 8: SC_move_goal plus vel_ms[3] (world m/s): the goal is extrapolated every tick from the call (cap 0.6 s). vel_ms null = as SC_move_goal. */
+int SC_move_goal_v(const char* owner, int sid, int sys, const int64_t* ch, const double* loc, const double* pt_uu, int ff_cms, int ff_valid, const double* vel_ms);
 /* 1 = move job of ship sid runs, 0 = none. */
 int SC_move_active(int sid);
 /* status of the move job of ship sid into out (size must be sizeof(ScMoveStatus)). 1 = ok (active 0 when none), 0 = refused. */

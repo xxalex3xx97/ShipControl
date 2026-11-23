@@ -120,7 +120,7 @@ extern "C"
     // WHAT: API level (sc_api.h SC_API_LEVEL). Callers refuse to run below the level they need.
     SHIP_CONTROL_API int SC_api()
     {
-        try { return 7; }
+        try { return 8; }
         catch (...) { return 0; }
     }
 
@@ -384,7 +384,8 @@ extern "C"
 
     // WHAT: API 7. Rewrites the goal (sys, ch[3], loc[3], pt_uu[3]; null = unchanged) and the follow feed-forward (ff_cms, ff_valid) of the running move job of ship sid
     //       for owner, in place: phase, throttle, aim state and speed estimates keep running. 1 = updated, 0 = no job / other owner / killed (the caller then uses SC_move_start).
-    SHIP_CONTROL_API int SC_move_goal(const char* owner, int sid, int sys, const int64_t* ch, const double* loc, const double* pt_uu, int ff_cms, int ff_valid)
+    //       API 8 SC_move_goal_v adds vel_ms[3] (world m/s): the goal is extrapolated every tick (cap SC_GV_MAX_AGE_S).
+    SHIP_CONTROL_API int SC_move_goal_v(const char* owner, int sid, int sys, const int64_t* ch, const double* loc, const double* pt_uu, int ff_cms, int ff_valid, const double* vel_ms)
     {
         try
         {
@@ -392,9 +393,15 @@ extern "C"
             const std::string who = owner;
             std::lock_guard<std::recursive_mutex> lk(g_mx);
             if (g_killed.load()) return 0;
-            return move_goal_job(who, sid, sys, ch, loc, pt_uu, ff_cms, ff_valid);
+            return move_goal_job(who, sid, sys, ch, loc, pt_uu, ff_cms, ff_valid, vel_ms);
         }
         catch (...) { return 0; }
+    }
+
+    // WHAT: API 7 = SC_move_goal_v without a goal velocity (clears any extrapolation of the job).
+    SHIP_CONTROL_API int SC_move_goal(const char* owner, int sid, int sys, const int64_t* ch, const double* loc, const double* pt_uu, int ff_cms, int ff_valid)
+    {
+        return SC_move_goal_v(owner, sid, sys, ch, loc, pt_uu, ff_cms, ff_valid, nullptr);
     }
 
     // WHAT: 1 = a move job of ship sid runs, 0 = none (or killed).

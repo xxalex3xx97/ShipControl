@@ -81,6 +81,10 @@ namespace
         std::vector<double> flips;
         int last_sign = 0;
         double turn_log = 0.0;
+        // SC_move_goal_v: gv = goal velocity (world m/s), gv_age = s since it was set (extrapolation clamps it), gv_on = extrapolate the goal every step.
+        double gv[3] = {0, 0, 0};
+        double gv_age = 0.0;
+        bool gv_on = false;
     };
 
     // WHAT: a job that ended in this tick: its ship, command seq and result text. Delivered to on_move_done after the registry lock is released.
@@ -263,6 +267,7 @@ namespace
         j.pt += dt;
         j.samp += dt;
         j.log_acc += dt;
+        j.gv_age += dt;
         if (j.samp >= SM_SAMPLE_S)
         {
             j.rate = quat_angle_deg(j.qs, f.quat) / j.samp;
@@ -292,7 +297,9 @@ namespace
         if (j.mode == 1)
         {
             double rl[3] = {0, 0, 0};
-            if (!pt_rloc_calc(fr, f.sys, f.ch, f.loc_raw, j.sys, j.ch, j.loc, rl) || !aim_pt(fr, rl, aim))
+            double gl[3] = {j.loc[0], j.loc[1], j.loc[2]};
+            if (j.gv_on) sc_goal_extrap(j.loc, j.gv, j.gv_age, SM_RAW_PER_M, gl);
+            if (!pt_rloc_calc(fr, f.sys, f.ch, f.loc_raw, j.sys, j.ch, gl, rl) || !aim_pt(fr, rl, aim))
             { finish_job(sid, L"error: point lost", h, done, true); return; }
         }
         else if (j.mode == 2)
@@ -379,7 +386,8 @@ namespace
             {
                 j.turn_log = 0.0;
                 host_logw(h, L"PROBE ShipControl turn ship=" + std::to_wstring(sid) + L" want=" + std::to_wstring(err) + L" yaw=" + std::to_wstring(yaw) + L" pit=" + std::to_wstring(pit) +
-                                 L" got=" + std::to_wstring(j.rate) + L" sc=" + std::to_wstring(j.profile) + L" ph=" + std::to_wstring(j.phase) + L" t=" + std::to_wstring(j.t));
+                                 L" got=" + std::to_wstring(j.rate) + L" sc=" + std::to_wstring(j.profile) + L" ph=" + std::to_wstring(j.phase) + L" t=" + std::to_wstring(j.t) +
+                                 L" gv_age_ms=" + std::to_wstring(static_cast<int>(j.gv_age * 1000.0)) + L" gv=" + (j.gv_on ? L"1" : L"0"));
             }
             std::wstring e;
             if (aligned_now)
@@ -617,8 +625,9 @@ namespace
     // WHAT: rewrites the goal and the follow feed-forward of the running job of ship sid IN PLACE (SC_move_goal). Phase, thr, thr_t, view_t, v_close, prev_dist_m, q_log,
     //       vmax_est stay: the next step measures the distance to the new goal, and skips one closing-speed sample (goal_jump) so v_close is not corrupted.
     //       mode 0 uses pt_uu, mode 1 uses sys / ch / loc, mode 2 uses pt_uu as the ore location. A null pointer leaves that field as it is.
+    //       vel_ms (API 8) = goal velocity (world m/s): the goal is extrapolated every step from now (sc_goal_extrap). null = no extrapolation (clears it).
     //       1 = updated, 0 = no job for sid or the job belongs to another owner.
-    int move_goal_job(const std::string& owner, int sid, int sys, const int64_t* ch, const double* loc, const double* pt_uu, int ff_cms, int ff_valid)
+    int move_goal_job(const std::string& owner, int sid, int sys, const int64_t* ch, const double* loc, const double* pt_uu, int ff_cms, int ff_valid, const double* vel_ms)
     {
         auto it = g_jobs_mv.find(sid);
         if (it == g_jobs_mv.end() || it->second.owner != owner) return 0;
@@ -634,6 +643,9 @@ namespace
         j.ff_cms = ff_cms;
         j.ff_valid = ff_valid == 1 ? 1 : 0;
         j.goal_jump = true;
+        if (vel_ms) { std::memcpy(j.gv, vel_ms, sizeof(j.gv)); j.gv_on = true; }
+        else j.gv_on = false;
+        j.gv_age = 0.0;
         return 1;
     }
 

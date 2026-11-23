@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -386,7 +387,7 @@ static void t_move_goal()
     g_jobs_mv.clear();
     const int64_t ch[3] = {1, 2, 3};
     const double loc[3] = {10.0, 20.0, 30.0}, pt[3] = {5.0, 6.0, 7.0};
-    CHECK(move_goal_job("fleet", 7, 4, ch, loc, pt, 500, 1) == 0);          // no job
+    CHECK(move_goal_job("fleet", 7, 4, ch, loc, pt, 500, 1, nullptr) == 0);          // no job
     ScJob j;
     j.sid = 7;
     j.owner = "fleet";
@@ -400,15 +401,69 @@ static void t_move_goal()
     j.vmax_est = 90.0;
     j.mode = 1;
     g_jobs_mv[7] = j;
-    CHECK(move_goal_job("other", 7, 4, ch, loc, pt, 500, 1) == 0);          // other owner
-    CHECK(move_goal_job("fleet", 7, 4, ch, loc, pt, 500, 1) == 1);
+    CHECK(move_goal_job("other", 7, 4, ch, loc, pt, 500, 1, nullptr) == 0);          // other owner
+    CHECK(move_goal_job("fleet", 7, 4, ch, loc, pt, 500, 1, nullptr) == 1);
     const ScJob& k = g_jobs_mv[7];
     CHECK(k.sys == 4 && k.ch[0] == 1 && k.ch[2] == 3 && k.loc[1] == 20.0 && k.pt_uu[2] == 7.0);   // goal rewritten
     CHECK(k.ff_cms == 500 && k.ff_valid == 1 && k.goal_jump);
     CHECK(k.phase == 2 && k.thr == 6 && k.thr_t == 0.3 && k.view_t == 0.05);                         // aim / throttle state kept
     CHECK(k.v_close == 33.0 && k.prev_dist_m == 120.0 && k.q_log == 0.1 && k.vmax_est == 90.0);
-    CHECK(move_goal_job("fleet", 7, 4, nullptr, nullptr, nullptr, -100, 0) == 1 && g_jobs_mv[7].ch[1] == 2 && g_jobs_mv[7].ff_valid == 0);   // null = unchanged
+    CHECK(move_goal_job("fleet", 7, 4, nullptr, nullptr, nullptr, -100, 0, nullptr) == 1 && g_jobs_mv[7].ch[1] == 2 && g_jobs_mv[7].ff_valid == 0);   // null = unchanged
     g_jobs_mv.clear();
+}
+
+// API 8 A1: goal velocity extrapolation (sc_goal_extrap) and its job wiring (move_goal_job vel_ms).
+static void t_goal_extrap()
+{
+    const double R = SM_RAW_PER_M;
+    const double loc[3] = {1000.0, 2000.0, 3000.0};
+    double out[3] = {0, 0, 0};
+    const double vx[3] = {100.0, 0.0, 0.0}, vyz[3] = {0.0, -40.0, 10.0};
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    sc_goal_extrap(loc, vx, 0.25, R, out);
+    CHECK(NEARB(out[0], 1000.0 + 25.0 * R, 1e-6) && out[1] == 2000.0 && out[2] == 3000.0);       // 25 m along +X
+    sc_goal_extrap(loc, vyz, 0.1, R, out);
+    CHECK(NEARB(out[0], 1000.0, 1e-9) && NEARB(out[1], 2000.0 - 4.0 * R, 1e-3) && NEARB(out[2], 3000.0 + 1.0 * R, 1e-3));
+    sc_goal_extrap(loc, vx, 0.0, R, out);
+    CHECK(out[0] == loc[0] && out[1] == loc[1] && out[2] == loc[2]);                                 // age 0: unchanged
+    sc_goal_extrap(loc, vx, -1.0, R, out);
+    CHECK(out[0] == loc[0] && out[1] == loc[1] && out[2] == loc[2]);                                 // age < 0: unchanged
+    sc_goal_extrap(loc, vx, 2.0, R, out);
+    CHECK(NEARB(out[0], 1000.0 + 60.0 * R, 1e-6));                                                   // age clamped to 0.6 s
+    const double vnan[3] = {nan, -40.0, 10.0};
+    sc_goal_extrap(loc, vnan, 0.1, R, out);
+    CHECK(out[0] == loc[0] && NEARB(out[1], 2000.0 - 4.0 * R, 1e-3));                                // NaN v.x: that term is 0
+    sc_goal_extrap(loc, vx, nan, R, out);
+    CHECK(out[0] == loc[0]);                                                                         // NaN age: 0
+
+    // job wiring: vel set -> gv_on, age 0; a later tick ages it; vel null clears it
+    g_jobs_mv.clear();
+    const int64_t ch[3] = {0, 0, 0};
+    ScJob j;
+    j.sid = 9;
+    j.owner = "fleet";
+    j.mode = 1;
+    g_jobs_mv[9] = j;
+    CHECK(move_goal_job("fleet", 9, 4, ch, loc, nullptr, 0, 0, vx) == 1 && g_jobs_mv[9].gv_on && g_jobs_mv[9].gv_age == 0.0 && g_jobs_mv[9].gv[0] == 100.0);
+    g_jobs_mv[9].gv_age = 0.3;
+    CHECK(move_goal_job("fleet", 9, 4, ch, loc, nullptr, 0, 0, vx) == 1 && g_jobs_mv[9].gv_age == 0.0);
+    CHECK(move_goal_job("fleet", 9, 4, ch, loc, nullptr, 0, 0, nullptr) == 1 && !g_jobs_mv[9].gv_on);
+    g_jobs_mv.clear();
+
+    // aim level: the mode-1 step extrapolates the goal and then runs pt_rloc_calc + aim_pt, so the aim equals the aim of the goal moved by 25 m
+    ScFrame g;
+    g.loc[0] = 1000; g.loc[1] = 2000; g.loc[2] = 3000;
+    const int64_t c0[3] = {0, 0, 0};
+    const double l0[3] = {0, 0, 0};
+    const double tgt[3] = {655360.0, 0.0, 0.0};   // 10 m ahead, raw
+    const double vy[3] = {0.0, 100.0, 0.0};
+    double gl[3] = {0, 0, 0}, rl_a[3] = {0, 0, 0}, rl_b[3] = {0, 0, 0};
+    sc_goal_extrap(tgt, vy, 0.25, R, gl);
+    const double moved[3] = {655360.0, 25.0 * R, 0.0};
+    CHECK(pt_rloc_calc(g, 5, c0, l0, 5, c0, gl, rl_a) && pt_rloc_calc(g, 5, c0, l0, 5, c0, moved, rl_b));
+    ScAim aa, ab;
+    CHECK(aim_pt(g, rl_a, aa) && aim_pt(g, rl_b, ab));
+    CHECK(NEARB(aa.dist_m, ab.dist_m, 1e-9) && NEARB(aa.err_deg, ab.err_deg, 1e-9) && NEARB(aa.a_body[2], ab.a_body[2], 1e-12));
 }
 
 static void t_follow_smooth()
@@ -667,7 +722,7 @@ static void t_qcal_and_frame()
 // SC2b A2: move-job ABI sizes (also checked by static_asserts in sc_api.h) and the pure view raw conversion of sc_move.hpp.
 static void t_move_abi()
 {
-    CHECK(SC_API_LEVEL == 7);
+    CHECK(SC_API_LEVEL == 8);
     CHECK(sizeof(ScHost) == 112 && SC_HOST_SIZE_L2 == 24 && SC_HOST_SIZE_L3 == 80);
     CHECK(sizeof(ScMoveReq) == 160 && SC_MOVEREQ_SIZE_L5 == 128 && SC_MOVEREQ_SIZE_L6 == 144 && sizeof(ScMoveStatus) == 64);
     CHECK(sc_view_raw(1.0) == 65536 && sc_view_raw(-0.5) == -32768 && sc_view_raw(0.0) == 0);   // llround of deg * 65536
@@ -1010,6 +1065,7 @@ int main()
     t_approach_step_fast();
     t_quick_match();
     t_move_goal();
+    t_goal_extrap();
     t_follow_smooth();
     t_view_and_ore();
     t_aim_and_rloc();
