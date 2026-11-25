@@ -2,7 +2,7 @@
 
 Releases (zip + manifest.txt) are published on this repo's Releases page.
 
-Version **0.4.0** (`sc_version.hpp`), API level **5** (`sc_api.h`, `SC_API_LEVEL`). A UE4SS mod that owns ship control for other mods (MiningBenchMod is the first user). It exports a plain C ABI; other mods load `main.dll` and resolve the names with `GetProcAddress`. Needs MSCore 0.8.13 at runtime (flight reads and writes go through MSCore).
+Version **0.7.0** (`sc_version.hpp`), API level **8** (`sc_api.h`, `SC_API_LEVEL`). A UE4SS mod that owns ship control for other mods (MiningBenchMod is the first user). It exports a plain C ABI; other mods load `main.dll` and resolve the names with `GetProcAddress`. Needs MSCore 0.8.13 at runtime (flight reads and writes go through MSCore).
 
 The header `sc_api.h` is the contract. Append only: an export or a field is never changed or reordered.
 
@@ -81,7 +81,7 @@ Rules:
 |---|---|
 | Owner name | wide string in `SC_claim`, `SC_release`, `SC_release_all`; narrow string in every other export (`SC_move_start`, `SC_set_host_for`, `SC_*_for`, `SC_watch`, `SC_zero`) |
 | Claim first | `SC_move_start`, `SC_watch`, `SC_zero` and the bubble ladder act only on a ship you own |
-| Sizes | `ScHost` 24, 80 or 112; `ScMoveReq` 128; `ScMoveStatus` 64; `ScTune` `sizeof(ScTune)`; `ScSpeed` `sizeof(ScSpeed)`; `ScBubbleStatus` 56. Set `size` first; a wrong size is refused |
+| Sizes | `ScHost` 24, 80 or 112; `ScMoveReq` 128, 144 or 160; `ScMoveStatus` 64; `ScTune` `sizeof(ScTune)`; `ScSpeed` `sizeof(ScSpeed)`; `ScBubbleStatus` 56. Set `size` first; a wrong size is refused |
 | Callbacks | run on the game thread, may call `SC_*`, must never throw. `on_move_done` and `on_speed_abort` run after the registry lock is released, the others inside it (see ScHost layout) |
 | Legacy exports | `SC_set_host`, `SC_set_tune`, `SC_tick_*` without `_for` act for owner `mining` only. Use the `_for` exports with your own owner name |
 | Poll | `SC_move_active(sid)`, `SC_move_status(sid, &st)` (set `st.size = sizeof(ScMoveStatus)`), `SC_move_cancel(owner, sid)` |
@@ -102,6 +102,9 @@ Kill switch: `SC_kill(1, err, n)` refuses every control export and ticks return 
 | 3 | move jobs: `SC_move_start`, `SC_move_cancel`, `SC_move_active`, `SC_move_status`, `SC_tick_frame`. ScHost 80 bytes | MSCore flight |
 | 4 | bubble ladder: `SC_tick_bubble`, `SC_bubble_status`. ScHost 112 bytes (4 callbacks: `first_blocker`, `bubble_profile`, `on_bubble`, `near_rock`) | MSCore flight |
 | 5 | owner-scoped: `SC_set_host_for`, `SC_set_tune_for`, `SC_tick_speed_for`, `SC_tick_frame_for`, `SC_tick_bubble_for` (owner = `mining`, `fleet`, ...). Legacy `SC_set_host`, `SC_set_tune`, `SC_tick_*` = the `_for` call with owner `mining`. A `_for` tick steps only that owner's jobs and ships and uses that owner's host and speed_k | same as 4 |
+| 6 | quick drive profile: `ScMoveReq` 144 bytes (`profile` 0 careful / 1 quick / 2 quick + track, `brake_pct`, `turn_pct`, `overshoot_m`). A 128-byte request is still accepted (careful profile) | MSCore flight |
+| 7 | follow mode + goal rewrite: `ScMoveReq` 160 bytes (`ff_cms`, `follow`, `ff_valid`, `pad`), `SC_move_goal` (rewrites sys / ch / loc / pt_uu and the feed-forward of a running job in place). A 144-byte request gets zeros in the level 7 fields | MSCore flight |
+| 8 | `SC_move_goal_v`: `SC_move_goal` plus `vel_ms[3]` (goal velocity, extrapolated up to 0.6 s). `ScMoveReq` size unchanged (160) | MSCore flight |
 
 Every export returns `int`, takes `wchar_t* err, int errlen` where it can refuse, and catches its own exceptions (a failure is a return code, never a throw).
 

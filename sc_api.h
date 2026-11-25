@@ -5,6 +5,8 @@
  * SC2b (API level 3) appends: move jobs (SC_move_start, SC_move_cancel, SC_move_active, SC_move_status, SC_tick_frame) and ScHost 80 bytes.
  * SC3 (API level 4) appends: bubble ladder (SC_tick_bubble, SC_bubble_status), ScHost 112 bytes (4 callbacks), structs ScBlockHit, ScBubbleProfile, ScBubbleEvent, ScBubbleStatus.
  * SC4 (API level 5) appends: owner-scoped SC_set_host_for, SC_set_tune_for, SC_tick_speed_for, SC_tick_frame_for, SC_tick_bubble_for. The legacy exports act for owner "mining".
+ * Level 6 appends: quick drive profile, ScMoveReq 144 bytes (profile, brake_pct, turn_pct, overshoot_m). A 128-byte request gets the careful profile.
+ * Level 7 appends: follow mode and SC_move_goal (rewrite goal and feed-forward of a running job), ScMoveReq 160 bytes (ff_cms, follow, ff_valid, pad).
  * Level 8 appends SC_move_goal_v: same as SC_move_goal plus vel_ms[3] (world m/s), goal extrapolated every tick, cap 0.6 s.
  * GAME FACTS: none. */
 #ifndef SC_API_H

@@ -385,6 +385,7 @@ extern "C"
     // WHAT: API 7. Rewrites the goal (sys, ch[3], loc[3], pt_uu[3]; null = unchanged) and the follow feed-forward (ff_cms, ff_valid) of the running move job of ship sid
     //       for owner, in place: phase, throttle, aim state and speed estimates keep running. 1 = updated, 0 = no job / other owner / killed (the caller then uses SC_move_start).
     //       API 8 SC_move_goal_v adds vel_ms[3] (world m/s): the goal is extrapolated every tick (cap SC_GV_MAX_AGE_S).
+    //       sys is always applied (int, never null); ch / loc / pt_uu are applied only when non-null.
     SHIP_CONTROL_API int SC_move_goal_v(const char* owner, int sid, int sys, const int64_t* ch, const double* loc, const double* pt_uu, int ff_cms, int ff_valid, const double* vel_ms)
     {
         try

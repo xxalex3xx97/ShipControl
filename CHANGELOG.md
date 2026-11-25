@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.0
+
+- API 8: `SC_move_goal_v(owner, sid, sys, ch, loc, pt_uu, ff_cms, ff_valid, vel_ms)`: same as `SC_move_goal` plus `vel_ms[3]` (goal velocity, world m/s). The move job extrapolates the goal every step from the call: goal + v * min(age, `SC_GV_MAX_AGE_S`), cap 0.6 s, so a stale call never drifts far. `vel_ms` null = no extrapolation. `SC_move_goal` stays API 7 (clears the extrapolation).
+- Fight track job (quick profile, `profile` = 2): the job never finishes by itself (the caller cancels it), the nose is kept on the target with a 0.3 deg dead zone (`SM_TRACK_DEG`).
+
 ## 0.6.1
 
 - Quick profile turn mapping (`view_offset_quick`): offset = full cap (`min(20*turn_pct/100, 60)`) while err > `SQ_TURN_FULL_DEG` (8); below that `max(err*SQ_TURN_K (3.5), SQ_TURN_MIN_DEG (10))`, and `<= err*SQ_TURN_TAPER (6)` when err < 5. Before: `min(err+7, cap)`, which gave about 22 deg offset at 15 deg error and a slow tail (9-15 deg/s). Careful profile unchanged.

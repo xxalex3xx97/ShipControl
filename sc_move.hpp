@@ -625,6 +625,7 @@ namespace
     // WHAT: rewrites the goal and the follow feed-forward of the running job of ship sid IN PLACE (SC_move_goal). Phase, thr, thr_t, view_t, v_close, prev_dist_m, q_log,
     //       vmax_est stay: the next step measures the distance to the new goal, and skips one closing-speed sample (goal_jump) so v_close is not corrupted.
     //       mode 0 uses pt_uu, mode 1 uses sys / ch / loc, mode 2 uses pt_uu as the ore location. A null pointer leaves that field as it is.
+    //       sys is always applied (it is an int, never null), even when ch / loc / pt_uu are null.
     //       vel_ms (API 8) = goal velocity (world m/s): the goal is extrapolated every step from now (sc_goal_extrap). null = no extrapolation (clears it).
     //       1 = updated, 0 = no job for sid or the job belongs to another owner.
     int move_goal_job(const std::string& owner, int sid, int sys, const int64_t* ch, const double* loc, const double* pt_uu, int ff_cms, int ff_valid, const double* vel_ms)
