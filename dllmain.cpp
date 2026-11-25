@@ -120,7 +120,7 @@ extern "C"
     // WHAT: API level (sc_api.h SC_API_LEVEL). Callers refuse to run below the level they need.
     SHIP_CONTROL_API int SC_api()
     {
-        try { return 5; }
+        try { return 8; }
         catch (...) { return 0; }
     }
 
@@ -346,14 +346,20 @@ extern "C"
         try
         {
             if (!owner || !*owner || !req) { put_err("error: bad move request", err, errlen); return 0; }
-            if (req->size != static_cast<int32_t>(sizeof(ScMoveReq))) { put_err("error: bad move request size", err, errlen); return 0; }
+            if (req->size != SC_MOVEREQ_SIZE_L5 && req->size != SC_MOVEREQ_SIZE_L6 && req->size != static_cast<int32_t>(sizeof(ScMoveReq))) { put_err("error: bad move request size", err, errlen); return 0; }
+            // older client: its struct ends at 128 / 144 bytes, so work on a zeroed 160-byte copy (careful profile, no follow) and never touch memory past 128
+            ScMoveReq full;
+            std::memset(&full, 0, sizeof(full));
+            std::memcpy(&full, req, static_cast<size_t>(req->size));
             const std::string who = owner;
             std::lock_guard<std::recursive_mutex> lk(g_mx);
             if (g_killed.load()) { put_err("error: ShipControl killed", err, errlen); return 0; }
             std::string why;
             if (!g_owners.may_act(sid, who, why)) { put_err("error: ship " + why, err, errlen); return 0; }
             std::wstring w;
-            if (!move_start_job(who, sid, *req, g_hosts.of(who), w)) { if (err && errlen > 0) { std::wstring c = w.substr(0, static_cast<size_t>(errlen - 1)); std::memcpy(err, c.c_str(), (c.size() + 1) * sizeof(wchar_t)); } return 0; }
+            if (!move_start_job(who, sid, full, g_hosts.of(who), w)) { if (err && errlen > 0) { std::wstring c = w.substr(0, static_cast<size_t>(errlen - 1)); std::memcpy(err, c.c_str(), (c.size() + 1) * sizeof(wchar_t)); } return 0; }
+            req->out_cid = full.out_cid;
+            req->out_steps = full.out_steps;
             return 1;
         }
         catch (const std::exception& e) { put_err(std::string("exception: ") + e.what(), err, errlen); }
@@ -374,6 +380,29 @@ extern "C"
             return move_cancel_job(who, sid, g_hosts.of(who));
         }
         catch (...) { return 0; }
+    }
+
+    // WHAT: API 7. Rewrites the goal (sys, ch[3], loc[3], pt_uu[3]; null = unchanged) and the follow feed-forward (ff_cms, ff_valid) of the running move job of ship sid
+    //       for owner, in place: phase, throttle, aim state and speed estimates keep running. 1 = updated, 0 = no job / other owner / killed (the caller then uses SC_move_start).
+    //       API 8 SC_move_goal_v adds vel_ms[3] (world m/s): the goal is extrapolated every tick (cap SC_GV_MAX_AGE_S).
+    //       sys is always applied (int, never null); ch / loc / pt_uu are applied only when non-null.
+    SHIP_CONTROL_API int SC_move_goal_v(const char* owner, int sid, int sys, const int64_t* ch, const double* loc, const double* pt_uu, int ff_cms, int ff_valid, const double* vel_ms)
+    {
+        try
+        {
+            if (!owner || !*owner) return 0;
+            const std::string who = owner;
+            std::lock_guard<std::recursive_mutex> lk(g_mx);
+            if (g_killed.load()) return 0;
+            return move_goal_job(who, sid, sys, ch, loc, pt_uu, ff_cms, ff_valid, vel_ms);
+        }
+        catch (...) { return 0; }
+    }
+
+    // WHAT: API 7 = SC_move_goal_v without a goal velocity (clears any extrapolation of the job).
+    SHIP_CONTROL_API int SC_move_goal(const char* owner, int sid, int sys, const int64_t* ch, const double* loc, const double* pt_uu, int ff_cms, int ff_valid)
+    {
+        return SC_move_goal_v(owner, sid, sys, ch, loc, pt_uu, ff_cms, ff_valid, nullptr);
     }
 
     // WHAT: 1 = a move job of ship sid runs, 0 = none (or killed).

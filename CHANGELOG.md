@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.7.0
+
+- API 8: `SC_move_goal_v(owner, sid, sys, ch, loc, pt_uu, ff_cms, ff_valid, vel_ms)`: same as `SC_move_goal` plus `vel_ms[3]` (goal velocity, world m/s). The move job extrapolates the goal every step from the call: goal + v * min(age, `SC_GV_MAX_AGE_S`), cap 0.6 s, so a stale call never drifts far. `vel_ms` null = no extrapolation. `SC_move_goal` stays API 7 (clears the extrapolation).
+- Fight track job (quick profile, `profile` = 2): the job never finishes by itself (the caller cancels it), the nose is kept on the target with a 0.3 deg dead zone (`SM_TRACK_DEG`).
+
+## 0.6.1
+
+- Quick profile turn mapping (`view_offset_quick`): offset = full cap (`min(20*turn_pct/100, 60)`) while err > `SQ_TURN_FULL_DEG` (8); below that `max(err*SQ_TURN_K (3.5), SQ_TURN_MIN_DEG (10))`, and `<= err*SQ_TURN_TAPER (6)` when err < 5. Before: `min(err+7, cap)`, which gave about 22 deg offset at 15 deg error and a slow tail (9-15 deg/s). Careful profile unchanged.
+- The quick offset vector is scaled (both axes by the same factor) so no axis exceeds `SC_VIEW_AXIS_MAX_DEG` (40, nav-note MaxSteeringDegrees, UNVERIFIED live). A degenerate rotation axis with err > 3 deg sends yaw = mag instead of a zero offset (min 3 deg).
+- New probe `PROBE ShipControl turn_stall ship= want= got= yaw= pit= sent_clamped= job_age=` (want > 10 deg, got < 2 deg/s for > 0.3 s, at most 1/s). The turn line gets `sc=<profile>`. `got` is 0 for the first 0.25 s of a job (rate sample window), so job_age < 0.5 is a restart artefact.
+- API level 7 unchanged.
+
+## 0.6.0
+
+- API 7: `ScMoveReq` grows to 160 bytes: `ff_cms` (off 144, captain speed along the line ship -> goal, cm/s, signed), `follow` (off 148), `ff_valid` (off 152), `pad` (off 156). `SC_move_start` accepts 128, 144 and 160 byte structs (missing fields are zero: old behaviour).
+- Follow mode (quick profile, `follow` = 1 and `ff_valid` = 1): the job never finishes by itself. It matches the captain speed in the slot with normal throttle only (feed-forward + P on the slot error + speed-mismatch damping, hard brake on overshoot, brake hysteresis). Fleet cancels / restarts the job.
+- Per-ship max speed estimate (starts from the game limit, learned from steady throttle / speed, kept per ship id).
+- Log every 0.25 s: `ShipControl match ship=.. v_cap=.. v_own=.. thr=.. err=.. vmax_est=..`.
+- New export `SC_move_goal(owner, sid, sys, ch, loc, pt_uu, ff_cms, ff_valid)`: rewrites the goal and the follow feed-forward of the running job in place (no phase / throttle / aim / speed reset; one closing-speed sample is skipped). Returns 0 when there is no job (the caller then uses `SC_move_start`). Replaces cancel + restart, which stopped the turn every time.
+- Logs: `ShipControl turn ship=.. want=.. yaw=.. pit=.. got=.. ph=.. t=..` every 0.5 s; the quick / match lines now also print in phase 1.
+- Smooth follow near the slot (`quick_match_step`): above 80 m the plain quick controller; below it an EMA-smoothed proportional throttle (any step -10..10); below 40 m the throttle moves 1 step per 0.25 s (0.5 s in the 3 m dead zone, pure feed-forward there) and a thr sign change waits 0.5 s; reverse only past the slot (hard only to kill speed, else at most -2). Follow steering (`view_offset_follow`): 2.5 deg dead zone, 0.5 deg offset per deg of error, 60 deg/s slew limit; errors above 30 deg keep the hard turn.
+- All ShipControl trace lines (`match`, `quick`, `turn`) start with `PROBE ` so the Fleet log filter keeps them. The match line also prints `sign_flips_per_s` (thr sign changes in the last 4 s / 4).
+- Quick drive (non-follow, combat roles): the ship stops instantly at throttle 0, so `approach_step_fast` sets the step straight from the distance every 0.1 s: full beyond `SQ_FULL_M` (60 m), else ceil(cap * remaining / 60) (min 1), thr 0 + done at remaining <= `SQ_STOP_M` (3 m), thr 0 while the heading error is above `SQ_HEAD_DEG`. No reverse, no hysteresis, no overshoot use; `brake_pct` ignored. The follow-mode matcher (`quick_match_*`) and `approach_step_quick` are kept but unused (Fleet sends `follow` = 0). Careful profile unchanged.
+- Not done: heading match in the slot (no aim-at-direction mode exists yet).
+
+## 0.5.0
+
+- API 6: `ScMoveReq` grows from 128 to 144 bytes: `profile` (0 careful = unchanged default, 1 quick), `brake_pct`, `turn_pct`, `overshoot_m`. `SC_move_start` still accepts the 128-byte level 5 struct (careful profile).
+- Quick profile for escorts / defenders / attackers: the throttle jumps straight between steps (no ramp), hard brake (-10) when the closing speed is above what the remaining distance allows, full throttle to catch up, wider aim offset (`turn_pct`, default 150% of 20 deg), approach starts at a heading error below 30 deg. Closing speed comes from the distance change (EMA).
+- Log line every 0.25 s while quick: `ShipControl quick ship=.. thr=.. target=.. v_close=.. remaining=..`.
+- Constant `SQ_TAU_S` (assumed seconds to stop from max speed) is an estimate: calibrate in game.
+
 ## 0.4.0
 
 - API 5: owner-scoped host/tune/ticks (two mods can use ShipControl together); API 4 exports unchanged (owner mining).

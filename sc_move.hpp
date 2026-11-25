@@ -56,13 +56,35 @@ namespace
         double qs[4] = {1, 0, 0, 0};
         double rate = 0.0;
         double err = -1.0;
-        bool aligned = false, ore_fresh = false;
+        bool aligned = false, ore_fresh = false, track = false;   // track: fight nose job (profile 2)
         int thr = 0;
         bool warp_wait = false;
         double warp_t = 0.0;
         bool thr_warned = false;
         double ore_loc[3] = {0, 0, 0};
         std::string owner;
+        // level 6 quick profile: profile 1 = quick. v_close = closing speed EMA (m/s) from the distance change, prev_dist_m = last aim dist (-1 = none), vmax_ms = last known max speed, q_log = s since the last quick log line.
+        int profile = 0, brake_pct = 0, turn_pct = 0, overshoot_m = 0;
+        double prev_dist_m = -1.0, v_close = 0.0, vmax_ms = 0.0, q_log = 0.0;
+        double dec_t = 1e9;   // quick discrete drive: s since the last speed-step decision (1e9 = decide at once)
+        int fast_tgt = 0;     // quick discrete drive: last target step (for the trace between decisions)
+        // level 7 follow: ff_cms = captain speed along the line (cm/s), follow / ff_valid flags, vmax_init / vmax_est = max speed at step 10 (m/s, learned),
+        // thr_last / steady_t = last step and seconds it stayed within 1 step (learning gate).
+        int ff_cms = 0, follow = 0, ff_valid = 0, thr_last = 0;
+        double vmax_init = 0.0, vmax_est = 0.0, steady_t = 0.0;
+        // SC_move_goal: goal_jump = the goal was rewritten, so the next step skips one closing-speed sample. turn_log = s since the last turn log line.
+        bool goal_jump = false;
+        // smooth follow: match = throttle controller state, yaw_o / pit_o = last aim offset sent (deg), flips = times (j.t) of thr sign changes in the last 4 s, last_sign = last non-zero thr sign.
+        MatchState match;
+        double yaw_o = 0.0, pit_o = 0.0;
+        double stall_t = 0.0, stall_log = 1.0;   // turn_stall probe: s of want>10 deg with rate<2, s since the last probe line
+        std::vector<double> flips;
+        int last_sign = 0;
+        double turn_log = 0.0;
+        // SC_move_goal_v: gv = goal velocity (world m/s), gv_age = s since it was set (extrapolation clamps it), gv_on = extrapolate the goal every step.
+        double gv[3] = {0, 0, 0};
+        double gv_age = 0.0;
+        bool gv_on = false;
     };
 
     // WHAT: a job that ended in this tick: its ship, command seq and result text. Delivered to on_move_done after the registry lock is released.
@@ -72,6 +94,8 @@ namespace
     std::map<int, ScJob> g_jobs_mv;
     // WHAT: aim trace counter, shared by all ships (legacy view_aim_drive static trace_n).
     int g_trace_n = 0;
+    // WHAT: learned max speed at step 10 per ship id (survives job restarts). ponytail: never pruned (a few bytes per ship id seen); prune by live ids if it ever grows.
+    std::map<int, double> g_vmax_est;
 
     // WHAT: aim offset raw value of deg (ViewRotation raw per degree = SM_VIEW_RAW_PER_DEG, rounded). Pure.
     // WHY: 1:1 with view_aim_drive (llround of deg * 65536).
@@ -126,6 +150,20 @@ namespace
         if (j.thr_warned) return;
         j.thr_warned = true;
         host_logw(h, L"MOVE throttle write failed ship=" + std::to_wstring(j.sid) + L": " + e);
+    }
+
+    // WHAT: quick / match trace line, at most every 0.25 s (both phases). match = follow line. Advances j.q_log by dt: call once per tick.
+    void quick_trace(ScJob& j, double dt, const ScHost& h, int thr, int target, double v_own, double remaining)
+    {
+        j.q_log += dt;
+        if (j.q_log < 0.25) return;
+        j.q_log = 0.0;
+        if (j.follow && j.ff_valid)
+            host_logw(h, L"PROBE ShipControl match ship=" + std::to_wstring(j.sid) + L" v_cap=" + std::to_wstring(j.ff_cms / 100.0) + L" v_own=" + std::to_wstring(v_own) +
+                             L" thr=" + std::to_wstring(thr) + L" err=" + std::to_wstring(remaining) + L" vmax_est=" + std::to_wstring(j.vmax_est) + L" sign_flips_per_s=" + std::to_wstring(j.flips.size() / 4.0));
+        else
+            host_logw(h, L"PROBE ShipControl quick ship=" + std::to_wstring(j.sid) + L" thr=" + std::to_wstring(thr) + L" target=" + std::to_wstring(target) +
+                             L" v_close=" + std::to_wstring(v_own) + L" remaining=" + std::to_wstring(remaining));
     }
 
     // WHAT: view_zero: send the aim offset (0,0) to console cid. cid <= 0 = nothing was sent. A failure is only traced (legacy view_zero).
@@ -211,7 +249,7 @@ namespace
     {
         const int sid = j.sid;
         // 1. snapshot: POWER only for the approach (phase 2, not warping)
-        const int mask = FL_POSE | ((j.kind == 1 && j.phase == 2 && !j.warp_wait) ? FL_POWER : 0);
+        const int mask = FL_POSE | (j.profile == 1 ? FL_LIMITS : 0) | ((j.kind == 1 && j.phase == 2 && !j.warp_wait) ? FL_POWER : 0);
         MsFlight f;
         std::memset(&f, 0, sizeof(f));
         f.size = static_cast<int32_t>(sizeof(MsFlight));
@@ -229,6 +267,7 @@ namespace
         j.pt += dt;
         j.samp += dt;
         j.log_acc += dt;
+        j.gv_age += dt;
         if (j.samp >= SM_SAMPLE_S)
         {
             j.rate = quat_angle_deg(j.qs, f.quat) / j.samp;
@@ -258,7 +297,9 @@ namespace
         if (j.mode == 1)
         {
             double rl[3] = {0, 0, 0};
-            if (!pt_rloc_calc(fr, f.sys, f.ch, f.loc_raw, j.sys, j.ch, j.loc, rl) || !aim_pt(fr, rl, aim))
+            double gl[3] = {j.loc[0], j.loc[1], j.loc[2]};
+            if (j.gv_on) sc_goal_extrap(j.loc, j.gv, j.gv_age, SM_RAW_PER_M, gl);
+            if (!pt_rloc_calc(fr, f.sys, f.ch, f.loc_raw, j.sys, j.ch, gl, rl) || !aim_pt(fr, rl, aim))
             { finish_job(sid, L"error: point lost", h, done, true); return; }
         }
         else if (j.mode == 2)
@@ -284,10 +325,28 @@ namespace
         const double err = aim.err_deg;
         j.err = err;
         const bool approach = j.kind == 1;
+        const bool quick = j.profile == 1;
+        // quick: closing speed from the distance change (the speed monitor value is stale/slow), EMA 0.3, never below 0
+        if (quick)
+        {
+            if (j.goal_jump) j.goal_jump = false;   // the goal was rewritten: this distance change is not a speed sample
+            else if (j.prev_dist_m >= 0.0 && dt >= 0.005) j.v_close = 0.7 * j.v_close + 0.3 * (std::max)(0.0, (j.prev_dist_m - aim.dist_m) / dt);
+            j.prev_dist_m = aim.dist_m;
+            const double vm = (f.max_mod_raw > 0 ? f.max_mod_raw : f.max_base_raw) / SM_RAW_PER_M;
+            if (vm > 0.0) j.vmax_ms = vm;
+            if (j.vmax_init <= 0.0)
+            {
+                j.vmax_init = j.vmax_ms > 0.0 ? j.vmax_ms : 100.0;
+                const auto kv = g_vmax_est.find(sid);
+                j.vmax_est = kv != g_vmax_est.end() ? std::clamp(kv->second, 0.5 * j.vmax_init, 2.0 * j.vmax_init) : j.vmax_init;
+            }
+        }
         // 9. phase 1 (aim) ends
         if (j.phase == 1)
         {
-            const Phase1 p1 = phase1_decide(approach, err, j.pt);
+            Phase1 p1 = phase1_decide(approach, err, j.pt);
+            if (quick && approach && p1 == P1_NONE && err < SQ_HEAD_DEG) p1 = P1_TO_PHASE2;   // quick: start the approach at a wide error
+            if (j.track && (p1 == P1_FACE_OK || p1 == P1_FACE_TIMEOUT)) p1 = P1_NONE;   // track: goal rewritten every tick, never ends here
             if (p1 == P1_FACE_OK) { finish_job(sid, L"ok heading_error=" + std::to_wstring(err) + L"deg", h, done, true); return; }
             if (p1 == P1_FACE_TIMEOUT) { finish_job(sid, L"error: face timeout err=" + std::to_wstring(err), h, done, true); return; }
             if (p1 == P1_TO_PHASE2)
@@ -299,12 +358,37 @@ namespace
         }
         // 10. aim offset (view_send) every SM_VIEW_PERIOD_S, both phases
         j.view_t += dt;
+        j.turn_log += dt;
         if (j.view_t >= SM_VIEW_PERIOD_S)
         {
+            const double vdt = j.view_t;
             j.view_t = 0.0;
             double yaw = 0.0, pit = 0.0;
             bool aligned_now = false;
-            view_offset(err, aim.a_body, yaw, pit, aligned_now);
+            const double vcap = quick ? (std::min)(20.0 * (j.turn_pct > 0 ? j.turn_pct : 150) / 100.0, 60.0) : SM_VIEW_MAX_DEG;
+            if (quick && j.follow && j.ff_valid) view_offset_follow(err, aim.a_body, j.yaw_o, j.pit_o, vdt, vcap, yaw, pit, aligned_now);
+            else if (quick) view_offset_quick(err, aim.a_body, vcap, yaw, pit, aligned_now, j.track ? SM_TRACK_DEG : SM_FACE_DONE_DEG);
+            else view_offset(err, aim.a_body, yaw, pit, aligned_now, vcap);
+            bool sent_clamped = false;
+            if (quick && (std::max)(std::fabs(yaw), std::fabs(pit)) > SC_VIEW_AXIS_MAX_DEG) { view_clamp_axes(yaw, pit); sent_clamped = true; }
+            // stall probe: want > 10 deg and rate < 2 deg/s for > 0.3 s (job_age < 0.5 = restart artefact, else a real stall), at most once per s
+            j.stall_log += vdt;
+            if (err > 10.0 && j.rate < 2.0) j.stall_t += vdt; else j.stall_t = 0.0;
+            if (j.stall_t > 0.3 && j.stall_log >= 1.0)
+            {
+                j.stall_log = 0.0;
+                host_logw(h, L"PROBE ShipControl turn_stall ship=" + std::to_wstring(sid) + L" want=" + std::to_wstring(err) + L" got=" + std::to_wstring(j.rate) + L" yaw=" + std::to_wstring(yaw) +
+                                 L" pit=" + std::to_wstring(pit) + L" sent_clamped=" + std::to_wstring(sent_clamped ? 1 : 0) + L" job_age=" + std::to_wstring(j.t));
+            }
+            j.yaw_o = yaw;
+            j.pit_o = pit;
+            if (j.turn_log >= 0.5)
+            {
+                j.turn_log = 0.0;
+                host_logw(h, L"PROBE ShipControl turn ship=" + std::to_wstring(sid) + L" want=" + std::to_wstring(err) + L" yaw=" + std::to_wstring(yaw) + L" pit=" + std::to_wstring(pit) +
+                                 L" got=" + std::to_wstring(j.rate) + L" sc=" + std::to_wstring(j.profile) + L" ph=" + std::to_wstring(j.phase) + L" t=" + std::to_wstring(j.t) +
+                                 L" gv_age_ms=" + std::to_wstring(static_cast<int>(j.gv_age * 1000.0)) + L" gv=" + (j.gv_on ? L"1" : L"0"));
+            }
             std::wstring e;
             if (aligned_now)
             {
@@ -332,7 +416,11 @@ namespace
             j.thr_t = 0.0;
             return;
         }
-        if (j.phase != 2) return;
+        if (j.phase != 2)
+        {
+            if (quick) quick_trace(j, dt, h, j.thr, 0, j.v_close, aim.dist_m - j.radius_m - j.stop_m);
+            return;
+        }
         // 12. low power (power read in this snapshot, or one extra read on the transition tick) and the approach timeout
         bool lp = false;
         int lp_thr = 0;
@@ -358,7 +446,55 @@ namespace
             auto m = g_spd.mon.find(sid);
             if (m != g_spd.mon.end() && m->second.have) v_ms = m->second.v / SM_RAW_PER_M;
         }
-        const ApproachOut o = approach_step(remaining, v_ms, err, j.steps, lp, lp_thr, j.thr, j.thr_t, dt);
+        ApproachOut o;
+        if (quick && j.follow && j.ff_valid)
+        {
+            // follow: own speed = speed monitor magnitude when it has a sample, else the closing speed (the goal is fixed during a job, Fleet restarts it).
+            // The monitor is total speed, so sideways drift counts as forward; thrust is held at 0 above SQ_HEAD_DEG anyway.
+            double v_own = j.v_close;
+            if (g_spd.watch.count(sid))
+            {
+                auto m = g_spd.mon.find(sid);
+                if (m != g_spd.mon.end() && m->second.have) v_own = std::fabs(m->second.v) / SM_RAW_PER_M;
+            }
+            v_ms = v_own;
+            const double v_cap = j.ff_cms / 100.0;
+            const double slot = err > 90.0 ? -remaining : remaining;   // goal behind the nose = overshot the slot
+            const int cap = lowpower_throttle_cap((std::min)(SM_APPROACH_MAX_THR, j.steps), lp, lp_thr);
+            int thr = 0;
+            if (err > SQ_HEAD_DEG && err <= 90.0) thr = 0;   // turn first, hold the throttle
+            else thr = quick_match_step(j.match, dt, slot, v_cap, v_own, j.vmax_est, cap, j.thr, j.brake_pct, j.overshoot_m);
+            {   // sign flips (pos <-> neg, zeros skipped) in the last 4 s, for the match log
+                const int sg = thr > 0 ? 1 : (thr < 0 ? -1 : 0);
+                if (sg != 0)
+                {
+                    if (j.last_sign != 0 && sg != j.last_sign) j.flips.push_back(j.t);
+                    j.last_sign = sg;
+                }
+                while (!j.flips.empty() && j.flips.front() < j.t - 4.0) j.flips.erase(j.flips.begin());
+            }
+            j.steady_t = std::abs(thr - j.thr_last) <= 1 ? j.steady_t + dt : 0.0;
+            j.thr_last = thr;
+            j.vmax_est = vmax_learn(j.vmax_est, j.vmax_init, thr, v_own, j.steady_t);
+            g_vmax_est[sid] = j.vmax_est;
+            o = ApproachOut{thr, 0.0, thr, false};
+            quick_trace(j, dt, h, thr, thr, v_own, slot);
+        }
+        else if (quick)
+        {
+            v_ms = j.v_close;
+            QuickOut q{j.thr, false, j.fast_tgt};
+            if (j.dec_t >= SQ_STEP_S)
+            {
+                j.dec_t = 0.0;
+                q = approach_step_fast(remaining, v_ms, err, j.steps, lp, lp_thr, j.thr, j.overshoot_m);
+                j.fast_tgt = q.target;
+            }
+            else j.dec_t += dt;
+            o = ApproachOut{q.thr, 0.0, q.target, q.done};
+            quick_trace(j, dt, h, q.thr, q.target, v_ms, remaining);
+        }
+        else o = approach_step(remaining, v_ms, err, j.steps, lp, lp_thr, j.thr, j.thr_t, dt);
         j.thr = o.thr;
         j.thr_t = o.thr_t;
         if (o.done)
@@ -461,6 +597,14 @@ namespace
         j.handle = req.handle;
         j.radius_m = req.radius_m;
         j.stop_m = req.stop_m;
+        j.profile = req.profile >= 1 ? 1 : 0;
+        j.track = req.profile == 2 && j.kind == 0;
+        j.brake_pct = req.brake_pct;
+        j.turn_pct = req.turn_pct;
+        j.overshoot_m = req.overshoot_m;
+        j.ff_cms = req.ff_cms;
+        j.follow = req.follow == 1 ? 1 : 0;
+        j.ff_valid = req.ff_valid == 1 ? 1 : 0;
         j.phase = 1;
         j.owner = owner;
         if (f.flags & FF_OBJ_POSE) std::memcpy(j.qs, f.quat, sizeof(j.qs));
@@ -476,6 +620,34 @@ namespace
         req.out_steps = steps;
         g_jobs_mv[sid] = j;
         return true;
+    }
+
+    // WHAT: rewrites the goal and the follow feed-forward of the running job of ship sid IN PLACE (SC_move_goal). Phase, thr, thr_t, view_t, v_close, prev_dist_m, q_log,
+    //       vmax_est stay: the next step measures the distance to the new goal, and skips one closing-speed sample (goal_jump) so v_close is not corrupted.
+    //       mode 0 uses pt_uu, mode 1 uses sys / ch / loc, mode 2 uses pt_uu as the ore location. A null pointer leaves that field as it is.
+    //       sys is always applied (it is an int, never null), even when ch / loc / pt_uu are null.
+    //       vel_ms (API 8) = goal velocity (world m/s): the goal is extrapolated every step from now (sc_goal_extrap). null = no extrapolation (clears it).
+    //       1 = updated, 0 = no job for sid or the job belongs to another owner.
+    int move_goal_job(const std::string& owner, int sid, int sys, const int64_t* ch, const double* loc, const double* pt_uu, int ff_cms, int ff_valid, const double* vel_ms)
+    {
+        auto it = g_jobs_mv.find(sid);
+        if (it == g_jobs_mv.end() || it->second.owner != owner) return 0;
+        ScJob& j = it->second;
+        j.sys = sys;
+        if (ch) std::memcpy(j.ch, ch, sizeof(j.ch));
+        if (loc) std::memcpy(j.loc, loc, sizeof(j.loc));
+        if (pt_uu)
+        {
+            std::memcpy(j.pt_uu, pt_uu, sizeof(j.pt_uu));
+            if (j.mode == 2) std::memcpy(j.ore_loc, pt_uu, sizeof(j.ore_loc));
+        }
+        j.ff_cms = ff_cms;
+        j.ff_valid = ff_valid == 1 ? 1 : 0;
+        j.goal_jump = true;
+        if (vel_ms) { std::memcpy(j.gv, vel_ms, sizeof(j.gv)); j.gv_on = true; }
+        else j.gv_on = false;
+        j.gv_age = 0.0;
+        return 1;
     }
 
     // WHAT: cancels the job of ship sid for owner: aim offset stopped (view_zero), job erased. No zero, no callback. 1 = cancelled or none, 0 = other owner.

@@ -22,7 +22,7 @@ for name in sorted(header - exported):
 for name in sorted(exported - header):
     print(f"FAIL {name} exported from dllmain.cpp but not declared in sc_api.h")
     fails += 1
-# API 5: the owner-scoped exports exist and SC_api() returns 5
+# API 5: the owner-scoped exports exist and SC_api() returns 8
 for name in ("SC_set_host_for", "SC_set_tune_for", "SC_tick_speed_for", "SC_tick_frame_for", "SC_tick_bubble_for"):
     if name not in header or name not in exported:
         print(f"FAIL {name} missing (API 5)")
@@ -41,8 +41,8 @@ for legacy, new in (("SC_set_host", "SC_set_host_for"), ("SC_set_tune", "SC_set_
     if not re.search(r"SHIP_CONTROL_API int " + legacy + r"\([^)]*\)\s*\{\s*return " + new + r"\(kLegacyOwner,", dll):
         print(f"FAIL {legacy} is not a wrapper of {new}(kLegacyOwner, ...)")
         fails += 1
-if not lvl or lvl.group(1) != "5" or not ret or ret.group(1) != "5":
-    print("FAIL SC_api() / SC_API_LEVEL is not 5")
+if not lvl or lvl.group(1) != "8" or not ret or ret.group(1) != "8":
+    print("FAIL SC_api() / SC_API_LEVEL is not 8")
     fails += 1
 if not fails:
     print(f"ok {len(header)} SC_ exports match sc_api.h and dllmain.cpp")

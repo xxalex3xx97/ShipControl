@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -197,6 +198,398 @@ static void t_phase1_steer()
     CHECK(phase1_decide(true, 10.0, 0.0) == P1_NONE);
 }
 
+static void t_approach_step_quick()
+{
+    // args: remaining, v, err, cap, lp, lp_thr, thr_prev, vmax, brake_pct, overshoot
+    QuickOut q = approach_step_quick(5000.0, 0.0, 0.0, 10, false, 0, 0, 100.0, 100, 0);
+    CHECK(q.thr == 10 && q.target == 10 && !q.done);                       // far: full throttle at once, no ramp
+    q = approach_step_quick(30.0, 80.0, 0.0, 10, false, 0, 10, 100.0, 100, 0);
+    CHECK(q.thr == -10);                                                   // want_v 15, v 80 > 25: hard brake
+    q = approach_step_quick(-5.0, 50.0, 0.0, 10, false, 0, 10, 100.0, 100, 0);
+    CHECK(q.thr == -10 && !q.done);                                        // past the goal, fast
+    q = approach_step_quick(10.0, 50.0, 0.0, 10, false, 0, 10, 100.0, 100, 20);
+    CHECK(q.thr == -10);                                                   // overshoot_m eats the remaining
+    q = approach_step_quick(0.0, 5.0, 0.0, 10, false, 0, 3, 100.0, 100, 0);
+    CHECK(q.thr == -2 && !q.done);                                         // past the goal, slow: gentle reverse
+    q = approach_step_quick(0.0, 20.0, 0.0, 10, false, 0, 3, 100.0, 100, 0);
+    CHECK(q.thr == -4);
+    q = approach_step_quick(0.0, 0.5, 0.0, 10, false, 0, -2, 100.0, 100, 0);
+    CHECK(q.done && q.thr == 0);
+    q = approach_step_quick(5000.0, 0.0, 40.0, 10, false, 0, 5, 100.0, 100, 0);
+    CHECK(q.target == 0 && q.thr == 0);                                    // err > 30
+    q = approach_step_quick(200.0, 90.0, 0.0, 10, false, 0, -10, 100.0, 100, 0);   // want_v 100 -> v 90 <= want_v
+    CHECK(q.thr > 0);                                                      // release
+    q = approach_step_quick(100.0, 90.0, 0.0, 10, false, 0, -10, 100.0, 100, 0);   // want_v 50, v 90 > 50
+    CHECK(q.thr == -10);                                                   // keeps braking
+    q = approach_step_quick(5000.0, 0.0, 0.0, 10, true, 3, 0, 100.0, 100, 0);
+    CHECK(q.thr == 3 && q.target == 3);                                    // low-power cap
+    q = approach_step_quick(5000.0, 0.0, 0.0, 4, false, 0, 0, 100.0, 100, 0);
+    CHECK(q.thr == 4);                                                     // steps cap
+    for (double rem = -50.0; rem <= 3000.0; rem += 7.0)
+        for (double v = 0.0; v <= 150.0; v += 5.0)
+            for (int tp = -10; tp <= 10; tp += 5)
+            {
+                q = approach_step_quick(rem, v, 0.0, 7, false, 0, tp, 100.0, 100, 0);
+                CHECK(q.thr >= -10 && q.thr <= 7);
+            }
+    // 1D sim: speed follows thr*vmax/10 with a first-order lag (0.8 s), 10 Hz, stop at 100 m; must not overshoot > overshoot_m, must not reverse
+    for (int os : {0, 10})
+    {
+        double pos = 0.0, v = 0.0, vmax = 100.0, minv = 0.0;
+        int thr = 0;
+        bool done = false;
+        for (int i = 0; i < 6000 && !done; ++i)
+        {
+            q = approach_step_quick(100.0 - pos, v, 0.0, 10, false, 0, thr, vmax, 100, os);
+            thr = q.thr;
+            done = q.done;
+            if (done) break;
+            v += (thr * vmax / 10.0 - v) * (0.1 / 0.8);
+            pos += v * 0.1;
+            minv = (std::min)(minv, v);
+        }
+        CHECK(done);
+        CHECK(pos <= 100.0 + os + 1e-9 || pos - (100.0 + os) < 1.0);         // within the tolerance (+1 m sample slack)
+        CHECK(minv > -SQ_DONE_MS - 1e-9);                                    // never really reverses
+        if (pos > 100.0 + os + 1e-9) std::printf("sim os=%d pos=%f\n", os, pos);
+    }
+}
+
+static void t_approach_step_fast()
+{
+    // args: remaining, v, err, cap, lp, lp_thr, thr_prev, overshoot
+    QuickOut q = approach_step_fast(5000.0, 0.0, 0.0, 10, false, 0, 0, 0);
+    CHECK(q.thr == 10 && q.target == 10 && !q.done);                       // far: full at once
+    q = approach_step_fast(SQ_FULL_M, 0.0, 0.0, 10, false, 0, 0, 0);
+    CHECK(q.thr == 10);
+    q = approach_step_fast(30.0, 0.0, 0.0, 10, false, 0, 0, 0);
+    CHECK(q.thr == 5);                                                     // proportional
+    q = approach_step_fast(SQ_STOP_M + 0.5, 99.0, 0.0, 10, false, 0, 0, 0);
+    CHECK(q.thr == 1 && !q.done);                                          // just outside the stop distance: creep step 1
+    q = approach_step_fast(SQ_STOP_M, 99.0, 0.0, 10, false, 0, 7, 0);
+    CHECK(q.thr == 0 && q.done);
+    q = approach_step_fast(-50.0, 99.0, 0.0, 10, false, 0, 7, 0);
+    CHECK(q.thr == 0 && q.done);                                           // past the goal: stop, never reverse
+    q = approach_step_fast(5000.0, 0.0, 40.0, 10, false, 0, 5, 0);
+    CHECK(q.thr == 0 && q.target == 0 && !q.done);                         // err > head: turn first
+    q = approach_step_fast(5000.0, 0.0, 0.0, 10, true, 3, 0, 0);
+    CHECK(q.thr == 3);                                                     // low-power cap
+    q = approach_step_fast(5000.0, 0.0, 0.0, 4, false, 0, 0, 0);
+    CHECK(q.thr == 4);                                                     // steps cap
+    int prev = 0;
+    for (double rem = 0.0; rem <= 200.0; rem += 0.5)                     // monotone in remaining, never negative, never above cap
+    {
+        q = approach_step_fast(rem, 0.0, 0.0, 7, false, 0, 0, 0);
+        CHECK(q.thr >= prev && q.thr >= 0 && q.thr <= 7);
+        prev = q.thr;
+    }
+    double acc = 0.0;
+    bool a = step_due(acc, 0.04, SQ_STEP_S), b = step_due(acc, 0.04, SQ_STEP_S), c = step_due(acc, 0.04, SQ_STEP_S);
+    CHECK(!a && !b && c && acc == 0.0);
+    // instant-stop dynamics: speed = thr * vmax / 10 at once, decision every 0.1 s. Still goal 5 km away; moving goals start 200 m behind.
+    for (double vmax : {100.0, 200.0})
+        for (double vg : {0.0, 10.0, 40.0, 100.0})
+        {
+            double pos = 0.0, goal = vg == 0.0 ? 5000.0 : 200.0, dec = 1e9;
+            int thr = 0, flips = 0, last_sign = 0, maxthr = 0, minthr = 0;
+            bool done = false;
+            for (int i = 0; i < 40000 && !done; ++i)                      // 0.01 s per tick, 400 s
+            {
+                if (dec >= SQ_STEP_S)
+                {
+                    dec = 0.0;
+                    q = approach_step_fast(goal - pos, 0.0, 0.0, 10, false, 0, thr, 0);
+                    thr = q.thr;
+                    done = q.done;
+                    if (done) break;
+                }
+                else dec += 0.01;
+                pos += thr * vmax / 10.0 * 0.01;
+                goal += vg * 0.01;
+                maxthr = (std::max)(maxthr, thr);
+                minthr = (std::min)(minthr, thr);
+                const int s2 = thr > 0 ? 1 : thr < 0 ? -1 : 0;
+                if (s2 != 0) { if (last_sign != 0 && s2 != last_sign) ++flips; last_sign = s2; }
+            }
+            const double err = goal - pos;
+            if (vg == 0.0) CHECK(done && err <= SQ_STOP_M + 1e-9 && err >= -1.0);
+            else CHECK(vg >= vmax || (err <= 30.0 && (done || err > SQ_STOP_M)));   // inside Fleet's 30 m dead zone (or stopped; a goal as fast as the ship cannot be caught)
+            CHECK(maxthr <= 10 && minthr >= 0 && flips == 0);
+            std::printf("fast sim vmax=%.0f vg=%.0f err=%.1f thr=%d\n", vmax, vg, err, thr);
+        }
+}
+
+static void t_quick_match()
+{
+    // args: err, v_cap, v_own, vmax_est, cap, thr_prev, kp, kd, band, brake_pct, overshoot
+    auto M = [](double err, double vc, double vo, double vm, int cap, int tp) { return quick_match_throttle(err, vc, vo, vm, cap, tp, SQ_KP, SQ_KD, SQ_BAND_M, 100, 10); };
+    CHECK(M(0.0, 0.0, 0.0, 100.0, 10, 0).thr == 0);                  // captain stopped, in band
+    CHECK(M(2.0, 0.0, 0.0, 100.0, 10, 0).thr == 0);                  // small P term does not move it
+    CHECK(M(0.0, 50.0, 50.0, 100.0, 10, 5).thr == 5);               // captain at 50% of vmax: step 5
+    CHECK(M(0.0, 50.0, 50.0, 200.0, 10, 5).thr == 3 && M(0.0, 50.0, 50.0, 100.0, 10, 5).thr != M(0.0, 50.0, 50.0, 200.0, 10, 5).thr);   // vmax_est matters
+    CHECK(M(500.0, 40.0, 40.0, 100.0, 10, 4).thr == 10);            // far behind: full throttle
+    CHECK(M(500.0, 40.0, 40.0, 100.0, 5, 4).thr == 5);              // cap
+    CHECK(!M(500.0, 40.0, 40.0, 100.0, 10, 4).done);
+    CHECK(M(-50.0, 0.0, 30.0, 100.0, 10, 3).thr == -10);            // overshot, fast: hard brake
+    CHECK(M(-50.0, 0.0, 10.0, 100.0, 10, 3).thr < 0 && M(-50.0, 0.0, 10.0, 100.0, 10, 3).thr >= -4);   // slower: limited reverse
+    CHECK(M(-50.0, 40.0, 60.0, 100.0, 10, 3).thr < 0);              // ahead of the slot and faster than the captain: negative
+    CHECK(M(-3.0, 40.0, 40.0, 100.0, 10, 4).thr >= 0);              // slightly ahead, same speed: no reverse
+    CHECK(M(30.0, 0.0, 70.0, 100.0, 10, -10).thr == -10);           // hysteresis: still braking while v_own > v_des
+    CHECK(M(200.0, 0.0, 70.0, 100.0, 10, -10).thr > 0);             // v_des 100 > v_own: release
+    for (double e = -300.0; e <= 600.0; e += 13.0)
+        for (double vc = -20.0; vc <= 120.0; vc += 10.0)
+            for (double vo = 0.0; vo <= 200.0; vo += 10.0)
+                for (int tp = -10; tp <= 10; tp += 5)
+                {
+                    const int t = M(e, vc, vo, 100.0, 6, tp).thr;
+                    CHECK(t >= -10 && t <= 6);
+                }
+    // 1D sim: speed follows thr*vmax/10 with a 0.8 s lag (10 Hz); captain at v_c; ship starts 200 m behind its slot
+    for (double vc : {40.0, 0.0})
+    {
+        double cap_pos = 200.0, pos = 0.0, v = 0.0, vmax = 100.0, vmax_est = 100.0, maxneg = 0.0, steady = 0.0, mint = 0.0;
+        int thr = 0, last = 0, full_ticks = 0;
+        for (int i = 0; i < 1500; ++i)
+        {
+            const double err = cap_pos - pos;
+            thr = quick_match_throttle(err, vc, v, vmax_est, 10, thr, SQ_KP, SQ_KD, SQ_BAND_M, 100, 10).thr;
+            steady = std::abs(thr - last) <= 1 ? steady + 0.1 : 0.0;
+            last = thr;
+            if (thr >= 10) ++full_ticks;
+            mint = (std::min)(mint, static_cast<double>(thr));
+            v += (thr * vmax / 10.0 - v) * (0.1 / 0.8);
+            if (v < 0.0) v = 0.0;                                           // closing speed is not negative
+            pos += v * 0.1;
+            cap_pos += vc * 0.1;
+            maxneg = (std::min)(maxneg, cap_pos - pos);
+        }
+        const double err = cap_pos - pos;
+        CHECK(std::fabs(err) < SQ_BAND_M);                                  // converged in the band
+        CHECK(thr == static_cast<int>(std::lround(vc / vmax * 10.0)) || std::abs(thr - vc / vmax * 10.0) <= 1.0);   // holds the captain speed
+        CHECK(maxneg > -2.0 * 10.0);                                        // never rams (err >= -2 * overshoot_m)
+        CHECK(full_ticks < 400 && mint >= -10.0);                           // full throttle only for the catch-up
+        if (vc == 0.0) CHECK(v < 1.0);                                      // captain at rest: ends at rest
+    }
+    // vmax_est learning
+    double est = 100.0;
+    for (int i = 0; i < 60; ++i) est = vmax_learn(est, 100.0, 5, 40.0, 2.0);   // truth 80 m/s
+    CHECK(NEARB(est, 80.0, 1.0));
+    CHECK(vmax_learn(100.0, 100.0, 5, 40.0, 1.0) == 100.0);                 // not steady long enough
+    CHECK(vmax_learn(100.0, 100.0, 1, 40.0, 2.0) == 100.0 && vmax_learn(100.0, 100.0, 5, 0.5, 2.0) == 100.0);
+    CHECK(vmax_learn(100.0, 100.0, 5, 400.0, 2.0) <= 200.0 + 1e-9);         // clamp holds at 2x init
+    est = 100.0;
+    for (int i = 0; i < 400; ++i) est = vmax_learn(est, 100.0, 2, 200.0, 2.0);
+    CHECK(NEARB(est, 200.0, 1e-9));
+}
+
+static void t_move_goal()
+{
+    g_jobs_mv.clear();
+    const int64_t ch[3] = {1, 2, 3};
+    const double loc[3] = {10.0, 20.0, 30.0}, pt[3] = {5.0, 6.0, 7.0};
+    CHECK(move_goal_job("fleet", 7, 4, ch, loc, pt, 500, 1, nullptr) == 0);          // no job
+    ScJob j;
+    j.sid = 7;
+    j.owner = "fleet";
+    j.phase = 2;
+    j.thr = 6;
+    j.thr_t = 0.3;
+    j.view_t = 0.05;
+    j.v_close = 33.0;
+    j.prev_dist_m = 120.0;
+    j.q_log = 0.1;
+    j.vmax_est = 90.0;
+    j.mode = 1;
+    g_jobs_mv[7] = j;
+    CHECK(move_goal_job("other", 7, 4, ch, loc, pt, 500, 1, nullptr) == 0);          // other owner
+    CHECK(move_goal_job("fleet", 7, 4, ch, loc, pt, 500, 1, nullptr) == 1);
+    const ScJob& k = g_jobs_mv[7];
+    CHECK(k.sys == 4 && k.ch[0] == 1 && k.ch[2] == 3 && k.loc[1] == 20.0 && k.pt_uu[2] == 7.0);   // goal rewritten
+    CHECK(k.ff_cms == 500 && k.ff_valid == 1 && k.goal_jump);
+    CHECK(k.phase == 2 && k.thr == 6 && k.thr_t == 0.3 && k.view_t == 0.05);                         // aim / throttle state kept
+    CHECK(k.v_close == 33.0 && k.prev_dist_m == 120.0 && k.q_log == 0.1 && k.vmax_est == 90.0);
+    CHECK(move_goal_job("fleet", 7, 4, nullptr, nullptr, nullptr, -100, 0, nullptr) == 1 && g_jobs_mv[7].ch[1] == 2 && g_jobs_mv[7].ff_valid == 0);   // null = unchanged
+    g_jobs_mv.clear();
+}
+
+// API 8 A1: goal velocity extrapolation (sc_goal_extrap) and its job wiring (move_goal_job vel_ms).
+static void t_goal_extrap()
+{
+    const double R = SM_RAW_PER_M;
+    const double loc[3] = {1000.0, 2000.0, 3000.0};
+    double out[3] = {0, 0, 0};
+    const double vx[3] = {100.0, 0.0, 0.0}, vyz[3] = {0.0, -40.0, 10.0};
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    sc_goal_extrap(loc, vx, 0.25, R, out);
+    CHECK(NEARB(out[0], 1000.0 + 25.0 * R, 1e-6) && out[1] == 2000.0 && out[2] == 3000.0);       // 25 m along +X
+    sc_goal_extrap(loc, vyz, 0.1, R, out);
+    CHECK(NEARB(out[0], 1000.0, 1e-9) && NEARB(out[1], 2000.0 - 4.0 * R, 1e-3) && NEARB(out[2], 3000.0 + 1.0 * R, 1e-3));
+    sc_goal_extrap(loc, vx, 0.0, R, out);
+    CHECK(out[0] == loc[0] && out[1] == loc[1] && out[2] == loc[2]);                                 // age 0: unchanged
+    sc_goal_extrap(loc, vx, -1.0, R, out);
+    CHECK(out[0] == loc[0] && out[1] == loc[1] && out[2] == loc[2]);                                 // age < 0: unchanged
+    sc_goal_extrap(loc, vx, 2.0, R, out);
+    CHECK(NEARB(out[0], 1000.0 + 60.0 * R, 1e-6));                                                   // age clamped to 0.6 s
+    const double vnan[3] = {nan, -40.0, 10.0};
+    sc_goal_extrap(loc, vnan, 0.1, R, out);
+    CHECK(out[0] == loc[0] && NEARB(out[1], 2000.0 - 4.0 * R, 1e-3));                                // NaN v.x: that term is 0
+    sc_goal_extrap(loc, vx, nan, R, out);
+    CHECK(out[0] == loc[0]);                                                                         // NaN age: 0
+
+    // job wiring: vel set -> gv_on, age 0; a later tick ages it; vel null clears it
+    g_jobs_mv.clear();
+    const int64_t ch[3] = {0, 0, 0};
+    ScJob j;
+    j.sid = 9;
+    j.owner = "fleet";
+    j.mode = 1;
+    g_jobs_mv[9] = j;
+    CHECK(move_goal_job("fleet", 9, 4, ch, loc, nullptr, 0, 0, vx) == 1 && g_jobs_mv[9].gv_on && g_jobs_mv[9].gv_age == 0.0 && g_jobs_mv[9].gv[0] == 100.0);
+    g_jobs_mv[9].gv_age = 0.3;
+    CHECK(move_goal_job("fleet", 9, 4, ch, loc, nullptr, 0, 0, vx) == 1 && g_jobs_mv[9].gv_age == 0.0);
+    CHECK(move_goal_job("fleet", 9, 4, ch, loc, nullptr, 0, 0, nullptr) == 1 && !g_jobs_mv[9].gv_on);
+    g_jobs_mv.clear();
+
+    // aim level: the mode-1 step extrapolates the goal and then runs pt_rloc_calc + aim_pt, so the aim equals the aim of the goal moved by 25 m
+    ScFrame g;
+    g.loc[0] = 1000; g.loc[1] = 2000; g.loc[2] = 3000;
+    const int64_t c0[3] = {0, 0, 0};
+    const double l0[3] = {0, 0, 0};
+    const double tgt[3] = {655360.0, 0.0, 0.0};   // 10 m ahead, raw
+    const double vy[3] = {0.0, 100.0, 0.0};
+    double gl[3] = {0, 0, 0}, rl_a[3] = {0, 0, 0}, rl_b[3] = {0, 0, 0};
+    sc_goal_extrap(tgt, vy, 0.25, R, gl);
+    const double moved[3] = {655360.0, 25.0 * R, 0.0};
+    CHECK(pt_rloc_calc(g, 5, c0, l0, 5, c0, gl, rl_a) && pt_rloc_calc(g, 5, c0, l0, 5, c0, moved, rl_b));
+    ScAim aa, ab;
+    CHECK(aim_pt(g, rl_a, aa) && aim_pt(g, rl_b, ab));
+    CHECK(NEARB(aa.dist_m, ab.dist_m, 1e-9) && NEARB(aa.err_deg, ab.err_deg, 1e-9) && NEARB(aa.a_body[2], ab.a_body[2], 1e-12));
+}
+
+static void t_follow_smooth()
+{
+    // 1D follow sim: control tick 0.25 s, physics 0.05 s, speed follows thr*vmax/10 with a 0.8 s lag. Captain 40 m/s (0-30 s), stopped (30-60 s), 20 m/s (60-90 s). Starts 100 m behind.
+    MatchState st;
+    double cap_pos = 100.0, pos = 0.0, v = 0.0, vmax = 100.0, maxabs = 0.0, worst_dthr = 0.0, err_end = 0.0;
+    int thr = 0, flips = 0, last_sign = 0, near_ticks = 0, mixed = 0, lo_ok = 0;
+    double mint = 0.0;
+    for (int i = 0; i < 360; ++i)
+    {
+        const double t = i * 0.25;
+        const double vc = t < 30.0 ? 40.0 : (t < 60.0 ? 0.0 : 20.0);
+        const double err = cap_pos - pos;
+        const int prev = thr;
+        thr = quick_match_step(st, 0.25, err, vc, v, vmax, 10, thr, 100, 10);   // v signed: reversing reads negative
+        CHECK(thr >= -10 && thr <= 10);
+        const bool settled = (t >= 15.0 && t < 30.0) || (t >= 45.0 && t < 60.0) || (t >= 75.0 && t < 90.0);   // away from the captain's speed changes
+        if (std::fabs(err) < SQ_NEAR_M && settled)
+        {
+            ++near_ticks;
+            worst_dthr = (std::max)(worst_dthr, static_cast<double>(std::abs(thr - prev)));
+            const int sg = thr > 0 ? 1 : (thr < 0 ? -1 : 0);
+            if (sg != 0) { if (last_sign != 0 && sg != last_sign) ++flips; last_sign = sg; }
+            if (thr > 0 && thr < 10) ++mixed;
+            if (thr == 0) ++lo_ok;
+        }
+        mint = (std::min)(mint, static_cast<double>(thr));
+        if (t < 30.0 || t >= 60.0) maxabs = (std::min)(maxabs, err);   // the captain's hard stop overshoots by the ship's own stopping distance (physics), not judged
+        for (int k = 0; k < 5; ++k)
+        {
+            v += (thr * vmax / 10.0 - v) * (0.05 / 0.8);
+            pos += v * 0.05;
+            cap_pos += vc * 0.05;
+        }
+        if (i == 119 || i == 239 || i == 359) { err_end = cap_pos - pos; CHECK(std::fabs(err_end) < 10.0); }   // converged in each captain phase
+        #ifdef SC_SIM_DEBUG
+        if (i % 8 == 0) std::printf("t=%.1f err=%.1f v=%.1f thr=%d\n", t, cap_pos - pos, v, thr);
+        #endif
+    }
+    CHECK(near_ticks > 100);
+    CHECK(flips < 2);                                                     // no sign chatter in the near zone
+    CHECK(worst_dthr <= 1.0);                                             // at most one step per 0.25 s near the slot
+    CHECK(maxabs > -2.0 * 10.0);                                          // never rams
+    CHECK(mixed > 20 && lo_ok > 10);                                      // intermediate steps are used, not only 0 / 10
+    // steering
+    const double up[3] = {0.0, 0.0, 1.0};
+    double yaw = 9.0, pit = 9.0;
+    bool al = false;
+    for (double e : {0.0, 1.5, 2.4})
+    {
+        view_offset_follow(e, up, 0.0, 0.0, 0.1, 30.0, yaw, pit, al);
+        CHECK(yaw == 0.0 && pit == 0.0 && al);                            // deadband: exactly zero
+    }
+    view_offset_follow(10.0, up, 4.0, 0.0, 0.1, 30.0, yaw, pit, al);
+    CHECK(!al && NEARB(yaw, 5.0, 1e-9) && NEARB(pit, 0.0, 1e-9));        // 0.5 deg per deg
+    view_offset_follow(20.0, up, 0.0, 0.0, 0.1, 30.0, yaw, pit, al);
+    CHECK(NEARB(yaw, 6.0, 1e-9));                                         // slew: 60 deg/s * 0.1 s
+    view_offset_follow(20.0, up, 6.0, 0.0, 0.1, 30.0, yaw, pit, al);
+    CHECK(NEARB(yaw, 10.0, 1e-9));                                        // proportional target 10 deg reached
+    view_offset_follow(45.0, up, 0.0, 0.0, 0.1, 30.0, yaw, pit, al);
+    CHECK(NEARB(yaw, 30.0, 1e-9));                                        // big error: hard turn, no slew
+    // quick turn mapping
+    view_offset_quick(1.9, up, 60.0, yaw, pit, al);
+    CHECK(al && yaw == 0.0 && pit == 0.0);
+    view_offset_quick(15.0, up, 60.0, yaw, pit, al);
+    CHECK(!al && NEARB(yaw, 40.0, 1e-9) && NEARB(pit, 0.0, 1e-9));       // full cap 60 clamped to the 40 axis limit
+    view_offset_quick(15.0, up, 30.0, yaw, pit, al);
+    CHECK(NEARB(yaw, 30.0, 1e-9));
+    view_offset_quick(6.0, up, 60.0, yaw, pit, al);
+    CHECK(NEARB(yaw, 21.0, 1e-9));                                        // 6 * 3.5
+    view_offset_quick(2.5, up, 60.0, yaw, pit, al);
+    CHECK(NEARB(yaw, 10.0, 1e-9));                                        // min 10 (taper 15)
+    view_offset_quick(1.99, up, 60.0, yaw, pit, al);
+    CHECK(al);
+    view_offset_quick(1.0, up, 60.0, yaw, pit, al, SM_TRACK_DEG); CHECK(!al && NEARB(yaw, 6.0, 1e-9));
+    view_offset_quick(0.2, up, 60.0, yaw, pit, al, SM_TRACK_DEG); CHECK(al && yaw == 0.0 && pit == 0.0);
+    view_offset_quick(1.0, up, 60.0, yaw, pit, al); CHECK(al);
+    const double dg[3] = {0, 0, 0};
+    view_offset_quick(47.0, dg, 60.0, yaw, pit, al);
+    CHECK(!al && (yaw != 0.0 || pit != 0.0));                             // never an all-zero offset at a big error
+    {   // vector scaled, direction kept: axis (0, -0.6, 0.8) -> yaw 0.8 mag, pit 0.6 mag
+        const double ax[3] = {0.0, -0.6, 0.8};
+        view_offset_quick(47.0, ax, 60.0, yaw, pit, al);
+        CHECK(NEARB(yaw, 40.0, 1e-9) && NEARB(pit, 30.0, 1e-9));
+        double y2 = 10.0, p2 = 80.0;
+        view_clamp_axes(y2, p2);
+        CHECK(NEARB(p2, 40.0, 1e-9) && NEARB(y2, 5.0, 1e-9));
+    }
+    for (double e = 0.0; e < 180.0; e += 0.5)                             // every axis always within the limit
+        for (double ang = 0.0; ang < 6.3; ang += 0.3)
+        {
+            const double ax[3] = {0.0, -std::sin(ang), std::cos(ang)};
+            view_offset_quick(e, ax, 60.0, yaw, pit, al);
+            CHECK(std::fabs(yaw) <= SC_VIEW_AXIS_MAX_DEG + 1e-9 && std::fabs(pit) <= SC_VIEW_AXIS_MAX_DEG + 1e-9);
+            if (e > SQ_TURN_NOZERO_ERR_DEG) CHECK(std::hypot(yaw, pit) >= SQ_TURN_NOZERO_MIN_DEG - 1e-9);
+        }
+    {   // 90 deg turn, first-order model rate = min(offset, 52), 0.1 s steps: new mapping beats old (min(err+7, 60)), overshoot < 3
+        double tn = -1.0, to = -1.0, ovn = 0.0, ovo = 0.0;
+        for (int mode = 0; mode < 2; ++mode)
+        {
+            double e = 90.0, t = 0.0, over = 0.0, t3 = -1.0;
+            for (int i = 0; i < 600; ++i)
+            {
+                if (e < 3.0 && t3 < 0.0) t3 = t;
+                double off = 0.0;
+                if (e >= SM_FACE_DONE_DEG || e <= -SM_FACE_DONE_DEG)
+                {
+                    const double ae = std::fabs(e);
+                    if (mode == 0) { view_offset_quick(ae, up, 60.0, yaw, pit, al); off = yaw; }
+                    else off = (std::min)(ae + SM_VIEW_DEADZONE_DEG, 60.0);
+                    off *= e > 0 ? 1.0 : -1.0;
+                }
+                const double rate = (std::min)(std::fabs(off), 52.0) * (off < 0 ? -1.0 : 1.0);
+                e -= rate * 0.1;
+                t += 0.1;
+                if (e < 0.0) over = (std::max)(over, -e);
+            }
+            if (mode == 0) { tn = t3; ovn = over; } else { to = t3; ovo = over; }
+        }
+        CHECK(tn > 0.0 && to > 0.0 && tn < to);
+        CHECK(ovn < 3.0);
+        (void)ovo;
+    }
+}
+
 static void t_approach_step()
 {
     ApproachOut o = approach_step(5000.0, 0.0, 0.0, 10, false, 0, 0, 0.0, 0.25);
@@ -329,9 +722,9 @@ static void t_qcal_and_frame()
 // SC2b A2: move-job ABI sizes (also checked by static_asserts in sc_api.h) and the pure view raw conversion of sc_move.hpp.
 static void t_move_abi()
 {
-    CHECK(SC_API_LEVEL == 5);
+    CHECK(SC_API_LEVEL == 8);
     CHECK(sizeof(ScHost) == 112 && SC_HOST_SIZE_L2 == 24 && SC_HOST_SIZE_L3 == 80);
-    CHECK(sizeof(ScMoveReq) == 128 && sizeof(ScMoveStatus) == 64);
+    CHECK(sizeof(ScMoveReq) == 160 && SC_MOVEREQ_SIZE_L5 == 128 && SC_MOVEREQ_SIZE_L6 == 144 && sizeof(ScMoveStatus) == 64);
     CHECK(sc_view_raw(1.0) == 65536 && sc_view_raw(-0.5) == -32768 && sc_view_raw(0.0) == 0);   // llround of deg * 65536
     // SC3 A2 (API 4): level 4 structs
     CHECK(sizeof(ScBlockHit) == 56 && sizeof(ScBubbleProfile) == 72);
@@ -668,6 +1061,12 @@ int main()
     t_power_dead_from();
     t_phase1_steer();
     t_approach_step();
+    t_approach_step_quick();
+    t_approach_step_fast();
+    t_quick_match();
+    t_move_goal();
+    t_goal_extrap();
+    t_follow_smooth();
     t_view_and_ore();
     t_aim_and_rloc();
     t_qcal_and_frame();
