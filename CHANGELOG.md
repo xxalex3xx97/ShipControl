@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.1
+
+- Fixed: the 0.7.0 release DLL was built against UE4SS 3.0.1 headers and could not be loaded by UE4SS v4. 0.7.1 is built in the v4 tree; no code change. `build.ps1` now builds in the v4 tree by default and refuses a non-v4 tree.
+
 ## 0.7.0
 
 - API 8: `SC_move_goal_v(owner, sid, sys, ch, loc, pt_uu, ff_cms, ff_valid, vel_ms)`: same as `SC_move_goal` plus `vel_ms[3]` (goal velocity, world m/s). The move job extrapolates the goal every step from the call: goal + v * min(age, `SC_GV_MAX_AGE_S`), cap 0.6 s, so a stale call never drifts far. `vel_ms` null = no extrapolation. `SC_move_goal` stays API 7 (clears the extrapolation).
