@@ -6,8 +6,11 @@ param(
 )
 $ErrorActionPreference = 'Continue'  # native tools write warnings to stderr; failures are checked via exit codes below
 $src  = $PSScriptRoot                  # source = this checkout (repo root)
-$deps = if ($env:MS_MODS_ROOT) { $env:MS_MODS_ROOT } else { 'F:\MSDemoMods' }   # RE-UE4SS tree, build output and backups (shared with user builds)
-$re   = "$deps\build\RE-UE4SS"
+$deps = if ($env:MS_MODS_ROOT) { $env:MS_MODS_ROOT } else { 'F:\MSDemoMods' }   # backups
+$re   = if ($env:MS_UE4SS_ROOT) { $env:MS_UE4SS_ROOT } else { 'F:\mscore-build\RE-UE4SS-v4' }   # UE4SS tree, must be v4
+# UE4SS v4 gate: a DLL built from 3.0.1 headers cannot be loaded by v4 (ShipControl 0.7.0 first shipped that way)
+$ueTag = (git -C $re describe --tags --exact-match 2>$null)
+if ("$ueTag" -notmatch '^v[4-9]\.') { throw "UE4SS tree '$re' is not a v4 tag (got '$ueTag'). Set MS_UE4SS_ROOT to a v4 tree." }
 $bt   = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools'
 $gameDir = if ($env:MS_GAME_DIR) { $env:MS_GAME_DIR } else { 'F:\SteamLibrary\steamapps\common\Main Sequence Demo\Windows\MainSequence' }
 $game = "$gameDir\Binaries\Win64\ue4ss\Mods\$Mod\dlls"
